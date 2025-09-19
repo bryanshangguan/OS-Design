@@ -1,6 +1,8 @@
 /*
 * Add NetID and names of all project partners
-*
+* Course: CS 416/518
+* NetID: ki120
+* Name: Kelvin Ihezue
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +13,7 @@ pthread_mutex_t mutex;
 int x = 0;
 int loop = 10000;
 
-/* Counter Incrementer function:
+/* Counter Incrementer function
  * This is the function that each thread will run which
  * increments the shared counter x by LOOP times.
  *
@@ -27,7 +29,12 @@ void *add_counter(void *arg) {
 
     for(i = 0; i < loop; i++){
 
-	x = x + 1;
+        pthread_mutex_lock(&mutex);  // Lock the mutex before updating x
+
+	    x = x + 1;
+
+        pthread_mutex_unlock(&mutex); // Unlock the mutex after updating x
+
     }
 
     return NULL;
@@ -53,11 +60,29 @@ int main(int argc, char *argv[]) {
 
     /* Implement Code Here */
 
+    if (pthread_mutex_init(&mutex, NULL) != 0) {
+        printf("Mutex initialization has failed\n");
+        return 1;
+    }
+
+    /* Create four threads to run the add_counter function */
+    pthread_create(&t1, NULL, add_counter, NULL);
+    pthread_create(&t2, NULL, add_counter, NULL);
+    pthread_create(&t3, NULL, add_counter, NULL);
+    pthread_create(&t4, NULL, add_counter, NULL);
+
 
     /* Make sure to join the threads */
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+    pthread_join(t3, NULL);
+    pthread_join(t4, NULL);
 
 
     printf("The final value of x is %d\n", x);
+
+    /* Destroy the mutex */
+    pthread_mutex_destroy(&mutex);
 
     return 0;
 }
