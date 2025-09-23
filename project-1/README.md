@@ -4,13 +4,13 @@ OS-Design # create README content
 
 ## PART 2
 
-In order to extract the top N bits from a 32-bit unsigned integer, the most efficient method would be bitwise shift to the right. The function shifts the input value to the right by 32 - N positions. This operation moves the N most significant bits into the least significant positions of the integer. The shifted result is then returned.
+To extract the top N bits from a 32 bit unsigned int, the most efficient method would be bitwise shift to the right. The function shifts the input value to the right by 32 - N positions. This operation moves the N most significant bits into the least significant positions of the int. The result is then returned.
 
-To set a specific bit within the bitmap, two steps are required:
+To set a specific bit within the bitmap:
 
-1. Find the Bit: First, we find the correct byte within the char array by dividing the bit index by 8 (byte_index = index / 8), since each char holds 8 bits. The specific position of the bit within that byte is found by modding the index (bit_offset = index % 8).
+1. Find the Bit: First, find the correct byte within the char array by dividing the bit index by 8. The specific position of the bit within that byte is found by modding the index.
 
-2. Apply a Mask: A mask is created by left shifting the value 1 by the bit_offset. This results in a byte that has a 1 only at the target position. The bitwise OR operator is then used to apply this mask to the byte. This sets the desired bit to 1 without changing any other bits in the byte.
+2. Apply a Mask: A mask is created by left shifting the value 1 by the bit_offset. The result is a byte that has a 1 only at the target position. The bitwise OR operator is then used to apply this mask to the byte.
 
 ## PART 3
 
