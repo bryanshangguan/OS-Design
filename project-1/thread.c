@@ -21,7 +21,7 @@ int loop = 10000;
  * such that update to the counter is sychronized across threads.
  *
  */
-void *add_counter(void *arg) {
+void *add_counter() {
 
     int i;
 
