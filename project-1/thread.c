@@ -1,8 +1,8 @@
 /*
 * Add NetID and names of all project partners
 * Course: CS 416/518
-* NetID: ki120
-* Name: Kelvin Ihezue
+* NetID: ki120, bys8
+* Name: Kelvin Ihezue, Bryan Shangguan
 */
 #include <stdio.h>
 #include <stdlib.h>

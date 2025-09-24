@@ -1,3 +1,10 @@
+/*
+* Add NetID and names of all project partners
+* Course: CS 416/518
+* NetID: ki120, bys8
+* Name: Kelvin Ihezue, Bryan Shangguan
+*/
+
 #define _XOPEN_SOURCE 700
 #include <stdio.h>
 #include <stdlib.h>
