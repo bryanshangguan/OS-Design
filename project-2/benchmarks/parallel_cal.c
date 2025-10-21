@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdlib.h> 
+#include <string.h>  
+#include <time.h>
 #include "../thread-worker.h"
 
 #define DEFAULT_THREAD_NUM 4
@@ -17,7 +20,7 @@ int  sum = 0;
 
 
 /* A CPU-bound task to do parallel array addition */
-void parallel_calculate(void* arg) {
+void *parallel_calculate(void* arg) {
 	
 	int i = 0, j = 0;
 	int n = *((int*) arg);
@@ -33,7 +36,7 @@ void parallel_calculate(void* arg) {
 		pthread_mutex_unlock(&mutex);
 	}
 
-	pthread_exit(NULL);
+	return NULL;
 }
 
 
@@ -57,32 +60,31 @@ void verify() {
 
 int main(int argc, char **argv) {
 	
-	int i = 0, j = 0;
-
-	if (argc == 1) {
-		thread_num = DEFAULT_THREAD_NUM;
-	} else {
-		if (argv[1] < 1) {
-			printf("enter a valid thread number\n");
-			return 0;
-		} else
-			thread_num = atoi(argv[1]);
-	}
+	if (argc < 2) {
+        thread_num = DEFAULT_THREAD_NUM;
+    } else {
+        int n = atoi(argv[1]);               
+        if (n < 1) {
+            printf("enter a valid thread number\n");
+            return 1;
+        }
+        thread_num = n;
+    }
 
 	// initialize counter
 	counter = (int*)malloc(thread_num*sizeof(int));
-	for (i = 0; i < thread_num; ++i)
+	for (int i = 0; i < thread_num; ++i)
 		counter[i] = i;
 
 	// initialize pthread_t
 	thread = (pthread_t*)malloc(thread_num*sizeof(pthread_t));
 
 	// initialize data array
-	for (i = 0; i < R_SIZE; ++i)
+	for (int i = 0; i < R_SIZE; ++i)
 		a[i] = (int*)malloc(C_SIZE*sizeof(int));
 
-	for (i = 0; i < R_SIZE; ++i)
-		for (j = 0; j < C_SIZE; ++j)
+	for (int i = 0; i < R_SIZE; ++i)
+		for (int j = 0; j < C_SIZE; ++j)
 			a[i][j] = j;
 
 	memset(&pSum, 0, R_SIZE*sizeof(int));
@@ -91,10 +93,10 @@ int main(int argc, char **argv) {
 
 	struct timespec start, end;
         clock_gettime(CLOCK_REALTIME, &start);
-	for (i = 0; i < thread_num; ++i)
+	for (int i = 0; i < thread_num; ++i)
 		pthread_create(&thread[i], NULL, &parallel_calculate, &counter[i]);
 
-	for (i = 0; i < thread_num; ++i)
+	for (int i = 0; i < thread_num; ++i)
 		pthread_join(thread[i], NULL);
 
         fprintf(stderr, "***************************\n");
@@ -109,12 +111,13 @@ int main(int argc, char **argv) {
 
 	// feel free to verify your answer here:
 	verify();
+	printf("Verified sum is: %d\n", sum);  // added for correctness check
+
 	// Free memory on Heap
 	free(thread);
 	free(counter);
 	
-	for (i = 0; i < R_SIZE; ++i)
-		free(a[i]);
+	for (int i = 0; i < R_SIZE; ++i) free(a[i]);
 
 #ifdef USE_WORKERS
         fprintf(stderr , "Total sum is: %d\n", sum);

@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <stdlib.h>
+#include <time.h>
 #include "../thread-worker.h"
 
 #define DEFAULT_THREAD_NUM 4
@@ -13,91 +15,102 @@ int* counter;
 pthread_t *thread;
 int r[VECTOR_SIZE];
 int s[VECTOR_SIZE];
-int sum = 0;
+static long long sum = 0;  /* use 64-bit to avoid overflow on large dot-products */
 
 /* A CPU-bound task to do vector multiplication */
-void vector_multiply(void* arg) {
-	int i = 0;
-	int n = *((int*) arg);
-	
-	for (i = n; i < VECTOR_SIZE; i += thread_num) {
-		pthread_mutex_lock(&mutex);
-		sum += r[i] * s[i];
-		pthread_mutex_unlock(&mutex);	
-	}
+void *vector_multiply(void* arg) {
+    int n = *((int*) arg);
 
-	pthread_exit(NULL);
+    /* accumulate locally to minimize lock contention */
+    long long local_sum = 0;
+
+    for (int i = n; i < VECTOR_SIZE; i += thread_num) {
+        local_sum += (long long)r[i] * (long long)s[i];
+    }
+
+    /* single critical section */
+    pthread_mutex_lock(&mutex);
+    sum += local_sum;
+    pthread_mutex_unlock(&mutex);
+
+    return NULL;
 }
 
-void verify() {
-	int i = 0;
-	sum = 0;
-	for (i = 0; i < VECTOR_SIZE; i += 1) {
-		sum += r[i] * s[i];	
-	}
-	//printf("verified sum is: %d\n", sum);
+static long long verify(void) {
+
+    long long verified = 0;
+
+    for (int i = 0; i < VECTOR_SIZE; i += 1) {
+        verified += (long long)r[i] * (long long)s[i];
+    }
+    /* if you want to print it for debugging:
+       printf("verified sum is: %lld\n", verified);
+    */
+   return verified;
 }
 
 int main(int argc, char **argv) {
-	
-	int i = 0;
 
-	if (argc == 1) {
-		thread_num = DEFAULT_THREAD_NUM;
-	} else {
-		if (argv[1] < 1) {
-			printf("enter a valid thread number\n");
-			return 0;
-		} else {
-			thread_num = atoi(argv[1]);
-		}
-	}
+    /* robust argument parsing */
+    if (argc < 2) {
+        thread_num = DEFAULT_THREAD_NUM;
+    } else {
+        int n = atoi(argv[1]);
+        if (n < 1) {
+            printf("enter a valid thread number\n");
+            return 1;
+        }
+        thread_num = n;
+    }
 
-	// initialize counter
-	counter = (int*)malloc(thread_num*sizeof(int));
-	for (i = 0; i < thread_num; ++i)
-		counter[i] = i;
+    /* initialize counter */
+    counter = (int*)malloc(thread_num*sizeof(int));
+    for (int i = 0; i < thread_num; ++i)
+        counter[i] = i;
 
-	// initialize pthread_t
-	thread = (pthread_t*)malloc(thread_num*sizeof(pthread_t));
+    /* initialize pthread_t */
+    thread = (pthread_t*)malloc(thread_num*sizeof(pthread_t));
 
-	// initialize data array
-	for (i = 0; i < VECTOR_SIZE; ++i) {
-		r[i] = i;
-		s[i] = i;
-	}
+    /* initialize data array */
+    for (int i = 0; i < VECTOR_SIZE; ++i) {
+        r[i] = i;
+        s[i] = i;
+    }
 
-	pthread_mutex_init(&mutex, NULL);
+    pthread_mutex_init(&mutex, NULL);
 
-	struct timespec start, end;
-        clock_gettime(CLOCK_REALTIME, &start);
+    struct timespec start, end;
+    clock_gettime(CLOCK_REALTIME, &start);
 
-	for (i = 0; i < thread_num; ++i)
-		pthread_create(&thread[i], NULL, &vector_multiply, &counter[i]);
+    for (int i = 0; i < thread_num; ++i)
+        pthread_create(&thread[i], NULL, vector_multiply, &counter[i]);
 
-	for (i = 0; i < thread_num; ++i)
-		pthread_join(thread[i], NULL);
+    for (int i = 0; i < thread_num; ++i)
+        pthread_join(thread[i], NULL);
 
-        fprintf(stderr, "***************************\n");
+    fprintf(stderr, "***************************\n");
 
-        clock_gettime(CLOCK_REALTIME, &end);
+    clock_gettime(CLOCK_REALTIME, &end);
 
-        printf("Total run time: %lu micro-seconds\n",
-               (end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000);
+    long sec  = (long)(end.tv_sec - start.tv_sec);
+    long nsec = (long)(end.tv_nsec - start.tv_nsec);
+    long usec = sec * 1000000L + nsec / 1000L;
+    printf("Total run time: %ld micro-seconds\n", usec);
 
-	pthread_mutex_destroy(&mutex);
-	verify();
+    
+    long long verified = verify();
+	printf("Verified sum is: %lld\n", verified);
 
-	// Free memory on Heap
-	free(thread);
-	free(counter);
 
 #ifdef USE_WORKERS
-        fprintf(stderr , "Total sum is: %d\n", sum);
-        print_app_stats();
-        fprintf(stderr, "***************************\n");
+    fprintf(stderr , "Total sum is: %lld\n", sum);
+    print_app_stats();
+    fprintf(stderr, "***************************\n");
 #endif
+	/* Free memory on Heap */
+	pthread_mutex_destroy(&mutex);
+    free(thread);
+    free(counter);
 
-
-	return 0;
+    return 0;
 }

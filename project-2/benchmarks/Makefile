@@ -1,19 +1,34 @@
-CC = gcc
-CFLAGS = -g -w
+# benchmarks/Makefile
+CC      ?= gcc
+CFLAGS  ?= -O2 -I.. -DUSE_WORKERS=1
+LIBS    := -pthread
+LDFLAGS := -L.. -lthread-worker
 
-all:: clean parallel_cal vector_multiply external_cal test
+# Allow scheduler selection; default PSJF
+SCHED ?= PSJF
 
-parallel_cal:
-	$(CC) $(CFLAGS) -pthread -o parallel_cal parallel_cal.c -L../ -lthread-worker
+# Default: build all benchmarks here
+all: external_cal parallelCal vector_multiply
 
-vector_multiply:
-	$(CC) $(CFLAGS) -pthread -o vector_multiply vector_multiply.c -L../ -lthread-worker
+# Build the parent static lib first (and clean it) so it’s always fresh
+../libthread-worker.a:
+	$(MAKE) -C .. clean
+	$(MAKE) -C .. SCHED=$(SCHED)
 
-external_cal:
-	$(CC) $(CFLAGS) -pthread -o external_cal external_cal.c -L../ -lthread-worker
+# NOTE: Output name matches README ("parallelCal")
+parallelCal: parallel_cal.c ../libthread-worker.a
+	$(CC) $(CFLAGS) $< $(LDFLAGS) -o $@ $(LIBS)
 
-test:
-	$(CC) $(CFLAGS) -pthread -o test test.c -L../ -lthread-worker
+external_cal: external_cal.c ../libthread-worker.a
+	$(CC) $(CFLAGS) $< $(LDFLAGS) -o $@ $(LIBS)
+
+vector_multiply: vector_multiply.c ../libthread-worker.a
+	$(CC) $(CFLAGS) $< $(LDFLAGS) -o $@ $(LIBS)
+
+# Optional test helper (if you still keep test.c here)
+test: test.c ../libthread-worker.a
+	$(CC) $(CFLAGS) $< $(LDFLAGS) -o $@ $(LIBS)
 
 clean:
-	rm -rf testcase test parallel_cal vector_multiply external_cal *.o ./record/ *.dSYM
+	rm -f external_cal parallelCal vector_multiply test
+	rm -rf record *.dSYM

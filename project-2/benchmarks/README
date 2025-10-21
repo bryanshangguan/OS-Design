@@ -1,9 +1,14 @@
 How to run the benchmark?
 -------------------------
+0. Build the library (from project root)
+	``` $ cd project-2 ```
 
-1. First, do a make clean and make
-	$ make clean
-	$ make
+	$ make clean && make SCHED=PSJF
+
+1. Enter the benchmarks folder and build the apps
+	$ cd benchmarks
+	$ make clean && make 
+
 
 2. Before running the benchmark, run 
 
@@ -19,6 +24,11 @@ Here 6 refers to the number of user-level threads to run. Similarly,
 
 	$ ./parallelCal 6
 	$ ./vector_multiply 6
+
+4. If you want run the benchmarks/test.c file
+
+	$ make test 	(while under benchmarks folder)
+	$ ./test 		
 
 Make sure to test your code with different user-level thread-worker thread count and measure performance. 
 We will test your code for large number (50-100) of user-level threads.

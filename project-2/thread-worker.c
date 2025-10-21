@@ -1,9 +1,19 @@
-// File:	thread-worker.c
-// List all group member's name:
-// username of iLab:
+// File:  thread-worker.c
+// List all group member's name: Kelvin Ihezue,...
+// username of iLab: ki120
 // iLab Server:
 
 #include "thread-worker.h"
+#include <errno.h>
+#include <stdlib.h>
+
+#define MAIN_OWNER ((worker_t)~0u)
+
+/* =========================================================================
+ * Library global state
+ * ========================================================================= */
+
+#define STACK_BYTES SIGSTKSZ
 
 //Global counter for total context switches and 
 //average turn around and response time
@@ -11,11 +21,209 @@ long tot_cntx_switches=0;
 double avg_turn_time=0;
 double avg_resp_time=0;
 
+// === Library state ===
+static ucontext_t scheduler_context;
+static ucontext_t main_context; 
+static tcb *curr = NULL;
+static tcb *all_threads = NULL;  // singly-linked list of all TCBs (READY/BLOCKED/COMPLETED)
+static int library_init = 0;
+static worker_t next_tid = 1;
 
-// INITAILIZE ALL YOUR OTHER VARIABLES HERE
-// YOUR CODE HERE
+// A simple FIFO ready queue
+static ready_queue_t run_queue = {0};
 
+// 1.1.5 Timers: globals + handler 
+static struct sigaction sig_a; // signal action for SIGPROF
+static struct itimerval t_intval; // interval + current value for ITIMER_PROF
 
+/* =========================================================================
+ * Forward declarations
+ * ========================================================================= */
+static void schedule(void);
+static void _trampoline(void);
+static void t_handler(int signal_num);
+static void t_ms_start(int quantum_ms);
+
+/* ready-queue */
+static void rq_init(ready_queue_t *q);
+static void rq_enqueue(tcb *t);
+static tcb* rq_dequeue(void);
+
+/* registry */
+static void registry_add(tcb *t);
+static tcb* find_tcb(worker_t tid);
+
+/* scheduler algorithm prototypes so schedule() can call them */
+static void sched_psjf(void);
+static void sched_mlfq(void);
+static void sched_cfs(void);
+
+/* mutex wait-queue */
+static inline void mutex_enqueue(worker_mutex_t *m, tcb *t);
+static inline tcb* mutex_dequeue(worker_mutex_t *m);
+
+/* utility for timers */
+static inline void convert_ms_itimerval(int ms, struct timeval *t_val);
+
+/* =========================================================================
+ * Ready queue helpers
+ * ========================================================================= */
+
+// Initialize a ready queue.
+static void rq_init(ready_queue_t *q) {     
+    q->head = q->tail = NULL;
+    q->length = 0;
+}
+
+// PART 1.1.4
+static void rq_enqueue(tcb *t) {
+  t->rq_next = NULL;
+  if (!run_queue.tail) run_queue.head = run_queue.tail = t;
+  else { run_queue.tail->rq_next = t; run_queue.tail = t; }
+  run_queue.length++;
+}
+
+// PART 1.1.4
+static tcb* rq_dequeue(void) {
+  tcb *t = run_queue.head;
+  if (!t) return NULL;
+  run_queue.head = t->rq_next;
+  if (!run_queue.head) run_queue.tail = NULL;
+  t->rq_next = NULL;
+  run_queue.length--;
+  return t;
+}
+
+/* =========================================================================
+ * Registry helpers (for join/find)
+ * ========================================================================= */
+static void registry_add(tcb *t) {
+    t->register_next = all_threads;
+    all_threads = t;
+}
+
+static tcb* find_tcb(worker_t tid) {
+    for (tcb *p = all_threads; p; p = p->register_next) {
+        if (p->t_id == tid) return p;
+    }
+    return NULL;
+}
+
+/* =========================================================================
+ * Mutex wait-queue helpers (Part 1.5)
+ * ========================================================================= */
+
+// Enqueue a TCB at the tail of a mutex's waiting queue
+static inline void mutex_enqueue(worker_mutex_t *m, tcb *t) {
+    t->mutex_next = NULL;
+    if (!m->queue_tail) { m->queue_head = m->queue_tail = t; }
+    else { 
+        m->queue_tail->mutex_next = t;
+        m->queue_tail = t;
+    }
+}
+
+// Dequeue the head TCB from a mutex's waiting queue
+static inline tcb* mutex_dequeue(worker_mutex_t *m) {
+    tcb *t = m->queue_head;
+    if (!t) return NULL;
+    m->queue_head = t->mutex_next;
+    if (!m->queue_head) m->queue_tail = NULL;
+    t->mutex_next = NULL;
+    return t;
+}
+
+/* =========================================================================
+ * Timer helpers (Part 1.1.5)
+ * ========================================================================= */
+
+// Convert milliseconds to an itimerval {seconds, useconds}
+static inline void convert_ms_itimerval(int ms, struct timeval *t_val) {
+    if (ms < 0) ms = 0;
+    t_val->tv_sec  = ms / 1000;
+    t_val->tv_usec = (ms % 1000) * 1000;
+}
+
+static void t_ms_start(int quantum_ms) {
+    // 1) Install the SIGPROF handler *via sigaction()
+    memset(&sig_a, 0, sizeof(sig_a));
+    sig_a.sa_handler = t_handler;
+    sigemptyset(&sig_a.sa_mask);
+    sig_a.sa_flags = SA_RESTART; // auto-restart some syscalls
+    if (sigaction(SIGPROF, &sig_a, NULL) != 0) {
+        perror("sigaction(SIGPROF)");
+        exit(1);
+    }
+
+    // Program ITIMER_PROF: periodic firing
+    memset(&t_intval, 0, sizeof(t_intval));
+    convert_ms_itimerval(quantum_ms, &t_intval.it_value);
+    convert_ms_itimerval(quantum_ms, &t_intval.it_interval);
+
+    if (setitimer(ITIMER_PROF, &t_intval, NULL) != 0) {
+        perror("setitimer(ITIMER_PROF)");
+        exit(1);
+    }
+}
+
+static void t_handler(int signal_num) {
+    (void) signal_num;
+    if (!curr) return;
+
+    // Preempt the running thread:
+    curr->status = T_READY;
+
+    // Put the preempted thread at the tail so others get a chance
+    rq_enqueue(curr);
+
+    tcb *me = curr;
+    curr = NULL;
+
+    swapcontext(&me->context, &scheduler_context);
+}
+
+/* =========================================================================
+ * scheduler
+ * ========================================================================= */
+
+//DO NOT MODIFY THIS FUNCTION
+/* scheduler */ 
+static void schedule() {
+	// - every time a timer interrupt occurs, your worker thread library 
+	// should be contexted switched from a thread context to this 
+	// schedule() function
+	
+	//YOUR CODE HERE
+
+	// Needed this to run part 1
+	if (curr && curr->status == T_RUNNING) {
+        curr->status = T_READY;
+        rq_enqueue(curr);
+    }
+    tcb *next = rq_dequeue();
+    if (!next) setcontext(&main_context);
+    next->status = T_RUNNING;
+    curr = next;
+    tot_cntx_switches++;
+    setcontext(&curr->context);
+
+	// - invoke scheduling algorithms according to the policy (PSJF or MLFQ or CFS)
+#if defined(PSJF)
+    	sched_psjf();
+#elif defined(MLFQ)
+	sched_mlfq(/* ... */);
+#elif defined(CFS)
+    	sched_cfs(/* ... */);  
+#else
+	# error "Define one of PSJF, MLFQ, or CFS when compiling. e.g. make SCHED=MLFQ"
+#endif
+}
+
+/* =========================================================================
+ * Public API
+ * ========================================================================= */
+
+// Part 1: 1.1
 /* create a new thread */
 int worker_create(worker_t * thread, pthread_attr_t * attr, 
                       void *(*function)(void*), void * arg) {
@@ -26,21 +234,96 @@ int worker_create(worker_t * thread, pthread_attr_t * attr,
        // after everything is set, push this thread into run queue and 
        // - make it ready for the execution.
 
+	   (void) attr; // Ignored for now
+
        // YOUR CODE HERE
-	
-    return 0;
+
+	   // --- ONE_TIME LIBRARY INITIALIZER (inline) ---
+	   if (!library_init) {
+		library_init = 1;
+
+		// init runqueue (1.1.4)
+        rq_init(&run_queue);
+
+		// capture main context so the scheduler can return to it
+        getcontext(&main_context);
+
+		// build scheduler context + stack
+		getcontext(&scheduler_context);
+		void *scheduler_stack = malloc(STACK_BYTES);
+		if (!scheduler_stack) {errno = ENOMEM; return -1;}
+
+		scheduler_context.uc_stack.ss_sp = scheduler_stack;
+        scheduler_context.uc_stack.ss_size = STACK_BYTES;
+        scheduler_context.uc_link = &main_context;   // if scheduler falls through
+        makecontext(&scheduler_context, schedule, 0);
+
+		// 1.1.5 Timers: arm the periodic preemption timer
+		t_ms_start(QUANTUM);
+	   } 
+	   
+	    // 1) allocate space of stack for this thread to run
+		tcb *t = (tcb*)calloc(1, sizeof(*t));
+		if (!t) {errno = ENOMEM; return -1;}
+
+		t->t_id = next_tid++;
+		t->status = T_READY;
+		t->is_finished  = false;
+	    t->return_value = NULL;
+		t->joiner_tid = 0; // Num of threads joined
+		t->waiting_on = 0;
+
+		// 2) create and initialize the context of this worker thread
+		getcontext(&t->context);
+		t->stack_size = STACK_BYTES;
+		t->stack = malloc(t->stack_size);
+		if (!t->stack) {free(t); errno = ENOMEM; return -1;}
+
+		t->context.uc_stack.ss_sp = t->stack;
+		t->context.uc_stack.ss_size = t->stack_size;
+		// when thread function returns, jump to scheduler
+		t->context.uc_link = &scheduler_context;
+
+		// fix:
+		t->start_routine = function;
+		t->start_arg     = arg;
+
+		/* Use a 0-arg trampoline so we don't pass pointers via varargs. */
+		makecontext(&t->context, (void(*)(void))_trampoline, 0);
+
+		// Register so joins/exits can find it even when not on run queue
+		registry_add(t);
+		
+		// Inline Enqueue to push READY tcb 't' to tail of run_queue
+		rq_enqueue(t); // 1.1.4
+
+		if (thread) {
+			*thread = t->t_id;
+		}
+    	return 0;
 };
 
+// Part 1.2 
 /* give CPU possession to other user-level worker threads voluntarily */
-int worker_yield() {
+void worker_yield(void) {
 	
 	// - change worker thread's state from Running to Ready
 	// - save context of this thread to its thread control block
 	// - switch from thread context to scheduler context
 
 	// YOUR CODE HERE
-	
-	return 0;
+
+	if (!curr) {
+		swapcontext(&main_context, &scheduler_context);
+		return;
+	}
+
+	curr->status = T_READY;
+	rq_enqueue(curr);
+
+	tcb *me = curr; // me points to the same TCB as curr
+	curr = NULL; 	// no current while the scheduler runs
+	swapcontext(&me->context, &scheduler_context);
 };
 
 /* terminate a thread */
@@ -48,8 +331,39 @@ void worker_exit(void *value_ptr) {
 	// - de-allocate any dynamic memory created when starting this thread
 
 	// YOUR CODE HERE
-};
+	if (!curr) {
+		setcontext(&scheduler_context);
+		// If setcontext returns for any reason, bail
+		abort();
+	};
 
+	// Keep a local alias; after we null out 'curr' we still need this TCB.
+	tcb *me = curr;
+
+	// 1) Save the return value passed by the thread function
+	me->return_value = value_ptr;
+
+	// 2) Mark logical completion in the TCB.
+	curr->is_finished = true;
+	curr->status = T_COMPLETED;
+
+	// Part 1.4: Wake the joiner if one exists
+	if (me->joiner_tid) {
+		tcb *j = find_tcb(me->joiner_tid);
+
+		if (j && j->waiting_on == me->t_id && j->status == T_BLOCKED) {
+			j->waiting_on = 0;
+			j ->status = T_READY;
+			rq_enqueue(j);  // 1.1.4
+		}
+	}
+	
+	// 4) This thread is done running; clear 'curr' so the scheduler owns the CPU.
+	curr = NULL;
+
+	swapcontext(&me->context, &scheduler_context);
+	// No return
+};
 
 /* Wait for thread termination */
 int worker_join(worker_t thread, void **value_ptr) {
@@ -58,15 +372,65 @@ int worker_join(worker_t thread, void **value_ptr) {
 	// - de-allocate any dynamic memory created by the joining thread
   
 	// YOUR CODE HERE
-	return 0;
+
+	// 1. Lookup & basic validation (find target)
+	tcb *target = find_tcb(thread);
+	if (!target) { errno = ESRCH; return -1; } // no such thread
+	if (curr && curr->t_id == thread) {errno = EDEADLK; return -1;} // self-join would deadlock
+
+	// 2. If target already finished, harvest result and free resources
+	if (target->status == T_COMPLETED) {
+		if (value_ptr) *value_ptr = target->return_value;
+		free(target->stack);
+		return 0;
+	}
+
+	if (curr) {
+		// 3. Record the join relationship
+		target->joiner_tid = curr->t_id;  // target knows who to wake
+		curr->waiting_on = thread;  	// caller records who it waits for 
+		curr->status = T_BLOCKED;
+
+		// 4. Switch to the scheduler; we’ll resume once target calls worker_exit
+		swapcontext(&curr->context, &scheduler_context);
+	} else {
+		// main thread joins → run scheduler until target completes
+		while (target->status != T_COMPLETED) {
+			swapcontext(&main_context, &scheduler_context);
+		}
+	}
+
+	// 5. resumed: target should be COMPLETED now
+	target = find_tcb(thread);
+	if (target && target->status == T_COMPLETED) {
+		if (value_ptr) {
+			*value_ptr = target->return_value;
+		}
+		free(target->stack);
+		return 0;
+	}
+
+	// If we got here, either target got detached or missing
+	errno = EINVAL;
+	return -1;
 };
+
+// === Part 1.5: Mutex implementation ===
 
 /* initialize the mutex lock */
 int worker_mutex_init(worker_mutex_t *mutex, 
                           const pthread_mutexattr_t *mutexattr) {
 	//- initialize data structures for this mutex
 
+	(void)mutexattr;
+
 	// YOUR CODE HERE
+	if (!mutex) {errno = EINVAL; return -1;}
+
+	mutex->owner = 0; 		// unlocked
+    mutex->queue_head = NULL;
+	mutex->queue_tail = NULL; 
+	mutex->init = 1;
 	return 0;
 };
 
@@ -79,6 +443,32 @@ int worker_mutex_lock(worker_mutex_t *mutex) {
         // context switch to the scheduler thread
 
         // YOUR CODE HERE
+		if (!mutex || !mutex->init) {errno = EINVAL; return -1;}
+
+		// main thread path
+		if (!curr) {
+			if (mutex->owner == 0) { mutex->owner = MAIN_OWNER; return 0; }
+			while (mutex->owner != 0) {
+				swapcontext(&main_context, &scheduler_context);
+			}
+			mutex->owner = MAIN_OWNER;
+			return 0;
+		}
+
+	   	if (mutex->owner == curr->t_id) {errno = EDEADLK; return -1;} // non-recursive
+
+		if (mutex->owner == 0) { // Fast path
+			mutex->owner = curr->t_id;
+			return 0;
+		}
+
+		// Slow path: already locked → block and wait our turn
+		curr->status = T_BLOCKED;
+		mutex_enqueue(mutex, curr);
+		tcb *me = curr; curr = NULL;
+		swapcontext(&me->context, &scheduler_context);
+
+		if (mutex->owner != me->t_id) {errno = EPERM; return -1;}
         return 0;
 };
 
@@ -89,17 +479,53 @@ int worker_mutex_unlock(worker_mutex_t *mutex) {
 	// so that they could compete for mutex later.
 
 	// YOUR CODE HERE
-	return 0;
-};
+	if (!mutex || !mutex->init) {errno = EINVAL; return -1;}
 
+	// main thread path
+	if (!curr) {
+		if (mutex->owner != MAIN_OWNER) {errno = EPERM; return -1;}
+		tcb *next_owner = mutex_dequeue(mutex);
+		if (next_owner) {
+			mutex->owner = next_owner->t_id;
+			next_owner->status = T_READY;
+			rq_enqueue(next_owner);
+		} else {
+			mutex->owner = 0;
+		}
+		return 0;
+	}
+
+	// worker path
+    if (mutex->owner != curr->t_id) { errno = EPERM; return -1; }
+    tcb *next_owner = mutex_dequeue(mutex);
+    if (next_owner) {
+        mutex->owner = next_owner->t_id;
+        next_owner->status = T_READY;
+        rq_enqueue(next_owner);
+    } else {
+        mutex->owner = 0;
+    }
+    return 0;
+};
 
 /* destroy the mutex */
 int worker_mutex_destroy(worker_mutex_t *mutex) {
 	// - de-allocate dynamic memory created in worker_mutex_init
 
+	if (!mutex || !mutex->init) {errno = EINVAL; return -1;}
+	if (mutex->owner != 0 || mutex->queue_head != NULL) {errno = EBUSY; return -1;}
+
+	// No dynamic memory was allocated inside the struct, so nothing to free.
+    // Just mark it deinitialized and clear fields to a known state.
+
+	mutex->init = 0;
+	mutex->owner = 0;
+	mutex->queue_head = NULL;
+	mutex->queue_tail = NULL;
 	return 0;
 };
 
+//DO NOT MODIFY THIS FUNCTION
 /* Pre-emptive Shortest Job First (POLICY_PSJF) scheduling algorithm */
 static void sched_psjf() {
 	// - your own implementation of PSJF
@@ -108,7 +534,7 @@ static void sched_psjf() {
 	// YOUR CODE HERE
 }
 
-
+//DO NOT MODIFY THIS FUNCTION
 /* Preemptive MLFQ scheduling algorithm */
 static void sched_mlfq() {
 	// - your own implementation of MLFQ
@@ -124,6 +550,7 @@ static void sched_mlfq() {
 	// Step4: Apply RR on the topmost queue with entries and run next thread
 }
 
+//DO NOT MODIFY THIS FUNCTION
 /* Completely fair scheduling algorithm */
 static void sched_cfs(){
 	// - your own implementation of CFS
@@ -142,28 +569,20 @@ static void sched_cfs(){
 	// Step6: Run the selected thread
 }
 
+/* =========================================================================
+ * Trampoline
+ * ========================================================================= */
 
-/* scheduler */
-static void schedule() {
-	// - every time a timer interrupt occurs, your worker thread library 
-	// should be contexted switched from a thread context to this 
-	// schedule() function
-	
-	//YOUR CODE HERE
-
-	// - invoke scheduling algorithms according to the policy (PSJF or MLFQ or CFS)
-#if defined(PSJF)
-    	sched_psjf();
-#elif defined(MLFQ)
-	sched_mlfq();
-#elif defined(CFS)
-    	sched_cfs();  
-#else
-	# error "Define one of PSJF, MLFQ, or CFS when compiling. e.g. make SCHED=MLFQ"
-#endif
+// ===> File-local (helper) functions <===
+static void _trampoline(void) {
+	// Never returns 
+	void *ret = curr->start_routine(curr->start_arg);
+	worker_exit(ret);
 }
 
-
+/* =========================================================================
+ * Stats
+ * ========================================================================= */
 
 //DO NOT MODIFY THIS FUNCTION
 /* Function to print global statistics. Do not modify this function.*/
@@ -173,9 +592,3 @@ void print_app_stats(void) {
        fprintf(stderr, "Average turnaround time %lf \n", avg_turn_time);
        fprintf(stderr, "Average response time  %lf \n", avg_resp_time);
 }
-
-
-// Feel free to add any other functions you need
-
-// YOUR CODE HERE
-
