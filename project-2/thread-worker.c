@@ -531,7 +531,93 @@ static void sched_psjf() {
 	// - your own implementation of PSJF
 	// (feel free to modify arguments and return types)
 
-	// YOUR CODE HERE
+	sigset_t oldset, blockset;
+    sigemptyset(&blockset);
+    sigaddset(&blockset, SIGPROF);
+    sigprocmask(SIG_BLOCK, &blockset, &oldset);
+t
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    unsigned long now_us = (unsigned long)now.tv_sec * 1000000UL + (unsigned long)now.tv_usec;
+
+    // Step 1
+    if (current_thread != NULL) {
+        unsigned long start_us = (unsigned long)quantum_start_time.tv_sec * 1000000UL +
+                                 (unsigned long)quantum_start_time.tv_usec;
+        unsigned long elapsed_us = now_us - start_us;
+
+        current_thread->run_time_us += elapsed_us;
+        current_thread->status = READY;
+        enqueue(current_thread);
+    }
+
+    // Step 2
+    if (runqueue_head == NULL) {
+        current_thread = NULL;
+
+        // stop the timer
+        struct itimerval timer = {0};
+        setitimer(ITIMER_PROF, &timer, NULL);
+
+        sigprocmask(SIG_SETMASK, &oldset, NULL);
+        setcontext(&main_context);
+        return;
+    }
+
+    // Step 3
+    tcb *shortest = runqueue_head;
+    tcb *prev = NULL;
+    tcb *shortest_prev = NULL;
+    for (tcb *iter = runqueue_head; iter != NULL; iter = iter->next) {
+        if (iter->run_time_us < shortest->run_time_us) {
+            shortest = iter;
+            shortest_prev = prev;
+        }
+        prev = iter;
+    }
+
+    // Step 4
+    if (shortest_prev == NULL) {
+        runqueue_head = shortest->next;
+    } else {
+        shortest_prev->next = shortest->next;
+    }
+    shortest->next = NULL;
+
+    // Step 5
+    current_thread = shortest;
+    current_thread->status = SCHEDULED;
+    tot_cntx_switches++;
+
+    // Step 6
+    if (current_thread->has_run_before == 0) {
+        struct timeval first_run_time;
+        gettimeofday(&first_run_time, NULL);
+        current_thread->first_run_time_us =
+            (unsigned long)first_run_time.tv_sec * 1000000UL +
+            (unsigned long)first_run_time.tv_usec;
+        current_thread->has_run_before = 1;
+    }
+
+    // Step 7
+#ifdef QUANTUM_US
+    unsigned long slice_us = QUANTUM_US;
+#else
+    unsigned long slice_us = 50000UL; // default 50 ms
+#endif
+    struct itimerval timer;
+    timer.it_value.tv_sec  = slice_us / 1000000UL;
+    timer.it_value.tv_usec = slice_us % 1000000UL;
+    timer.it_interval.tv_sec  = 0;
+    timer.it_interval.tv_usec = 0;
+    setitimer(ITIMER_PROF, &timer, NULL);
+
+    // Step 8
+    gettimeofday(&quantum_start_time, NULL);
+
+    // Step 9
+    sigprocmask(SIG_SETMASK, &oldset, NULL);
+    setcontext(&(current_thread->context));
 }
 
 //DO NOT MODIFY THIS FUNCTION
@@ -548,6 +634,123 @@ static void sched_mlfq() {
 	// Step2.2: Otherwise, push the thread back to its origin queue
 	// Step3: If time period S passes, promote all threads to the topmost queue (Rule 5)
 	// Step4: Apply RR on the topmost queue with entries and run next thread
+
+    sigset_t oldset, blockset;
+    sigemptyset(&blockset);
+    sigaddset(&blockset, SIGPROF);
+    sigprocmask(SIG_BLOCK, &blockset, &oldset);
+
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    unsigned long now_us = (unsigned long)now.tv_sec * 1000000UL + (unsigned long)now.tv_usec;
+    unsigned long elapsed_us = 0;
+
+    // Step 1
+    if (current_thread != NULL) {
+        unsigned long start_us = (unsigned long)quantum_start_time.tv_sec * 1000000UL + (unsigned long)quantum_start_time.tv_usec;
+        elapsed_us = now_us - start_us;
+
+        // update the accumulated quantum usage at current priority
+        current_thread->quantum_allotment_us += elapsed_us;
+        current_thread->status = READY;
+
+        // get the allotment time_slice array is expected to be in microseconds
+        unsigned long allotment_for_level = time_slice[current_thread->priority];
+
+        // Step 2.1
+        if (current_thread->quantum_allotment_us >= allotment_for_level) {
+            if (current_thread->priority < NUM_LEVELS - 1) {
+                current_thread->priority++;
+            }
+            // reset the accumulated allotment for the new level
+            current_thread->quantum_allotment_us = 0;
+        }
+        // Step2.2: push the thread back into its (possibly new) queue
+        enqueue(current_thread->priority, current_thread);
+    }
+
+    // Step 3
+    unsigned long last_boost_us = (unsigned long)last_boost_time.tv_sec * 1000000UL + (unsigned long)last_boost_time.tv_usec;
+    if (now_us - last_boost_us >= (unsigned long)PRIORITY_BOOST_S * 1000000UL) {
+        for (int lvl = 1; lvl < NUM_LEVELS; ++lvl) {
+            tcb *th = dequeue(lvl);
+            while (th != NULL) {
+                tcb *next = dequeue(lvl); // dequeue returns head each call
+                th->priority = 0;
+                th->quantum_allotment_us = 0;
+                enqueue(0, th);
+                th = next;
+            }
+        }
+        gettimeofday(&last_boost_time, NULL);
+    }
+
+    // Step 4
+    tcb *next_thread = NULL;
+    int pick_level = -1;
+    for (int i = 0; i < NUM_LEVELS; ++i) {
+#ifdef HAVE_PEEK_HEAD
+        if (peek_head(i) != NULL) {
+            next_thread = dequeue(i);
+            pick_level = i;
+            break;
+        }
+#else
+        if (mlfq_queues[i] != NULL) {
+            next_thread = dequeue(i);
+            pick_level = i;
+            break;
+        }
+#endif
+    }
+
+    if (next_thread == NULL) {
+        current_thread = NULL;
+        struct itimerval timer = {0};
+        setitimer(ITIMER_PROF, &timer, NULL);
+        sigprocmask(SIG_SETMASK, &oldset, NULL);
+        setcontext(&main_context);
+        return;
+    }
+
+    // schedule next thread
+    current_thread = next_thread;
+    current_thread->status = SCHEDULED;
+    tot_cntx_switches++;
+
+    // update response time metric if first run
+    if (current_thread->has_run_before == 0) {
+        struct timeval first_run_time;
+        gettimeofday(&first_run_time, NULL);
+        current_thread->first_run_time_us = (unsigned long)first_run_time.tv_sec * 1000000UL + (unsigned long)first_run_time.tv_usec;
+        current_thread->has_run_before = 1;
+    }
+
+    // either remaining allotment at this level or full allotment 
+    unsigned long allotment_for_level = time_slice[current_thread->priority];
+    unsigned long remaining_allotment_us = 0;
+
+    if (current_thread->quantum_allotment_us >= allotment_for_level) {
+        remaining_allotment_us = allotment_for_level;
+        current_thread->quantum_allotment_us = 0;
+    } else {
+        remaining_allotment_us = allotment_for_level - current_thread->quantum_allotment_us;
+    }
+
+    if (remaining_allotment_us == 0) {
+        remaining_allotment_us = allotment_for_level;
+    }
+
+    struct itimerval timer;
+    timer.it_value.tv_sec = remaining_allotment_us / 1000000UL;
+    timer.it_value.tv_usec = remaining_allotment_us % 1000000UL;
+    timer.it_interval.tv_sec = 0;
+    timer.it_interval.tv_usec = 0;
+    setitimer(ITIMER_PROF, &timer, NULL);
+
+    gettimeofday(&quantum_start_time, NULL);
+    sigprocmask(SIG_SETMASK, &oldset, NULL);
+    setcontext(&(current_thread->context));
 }
 
 //DO NOT MODIFY THIS FUNCTION
@@ -567,6 +770,74 @@ static void sched_cfs(){
 	// Step5: If the ideal time slice is smaller than minimum_granularity (MIN_SCHED_GRN), use MIN_SCHED_GRN instead
 	// Step5: Setup next time interrupt based on the time slice
 	// Step6: Run the selected thread
+
+    sigset_t oldset, blockset;
+    sigemptyset(&blockset);
+    sigaddset(&blockset, SIGPROF);
+    sigprocmask(SIG_BLOCK, &blockset, &oldset);
+
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    unsigned long elapsed_us = 0;
+
+    // Step 1
+    if (current_thread != NULL) {
+        elapsed_us = (now.tv_sec - quantum_start_time.tv_sec) * 1000000UL +
+                     (now.tv_usec - quantum_start_time.tv_usec);
+        current_thread->vruntime_us += elapsed_us;
+        current_thread->status = READY;
+        heap_insert(current_thread);
+    }
+
+    // Step 2
+    tcb *next_thread = heap_pop_min();
+
+    // Step 3
+    if (next_thread == NULL) {
+        current_thread = NULL;
+        struct itimerval timer = {0};
+        setitimer(ITIMER_PROF, &timer, NULL);
+        sigprocmask(SIG_SETMASK, &oldset, NULL);
+        setcontext(&main_context);
+        return;
+    }
+
+    // Step 4
+    current_thread = next_thread;
+    current_thread->status = SCHEDULED;
+    tot_cntx_switches++;
+
+    // Step 5
+    int num_runnable = heap_size() + 1;
+    unsigned long target_latency_us = TARGET_LATENCY * 1000UL;
+    unsigned long min_granularity_us = MIN_SCHED_GRN * 1000UL;
+    unsigned long time_slice_us = target_latency_us / num_runnable;
+    if (time_slice_us < min_granularity_us)
+        time_slice_us = min_granularity_us;
+
+    // Step 6
+    if (current_thread->has_run_before == 0) {
+        struct timeval first_run_time;
+        gettimeofday(&first_run_time, NULL);
+        current_thread->first_run_time_us =
+            (first_run_time.tv_sec * 1000000UL) + first_run_time.tv_usec;
+        current_thread->has_run_before = 1;
+    }
+
+    // Step 7
+    struct itimerval timer;
+    timer.it_value.tv_sec = time_slice_us / 1000000UL;
+    timer.it_value.tv_usec = time_slice_us % 1000000UL;
+    timer.it_interval.tv_sec = 0;
+    timer.it_interval.tv_usec = 0;
+    setitimer(ITIMER_PROF, &timer, NULL);
+
+    // Step 8
+    gettimeofday(&quantum_start_time, NULL);
+    sigprocmask(SIG_SETMASK, &oldset, NULL);
+
+    // Step 9
+    setcontext(&(current_thread->context));
 }
 
 /* =========================================================================
