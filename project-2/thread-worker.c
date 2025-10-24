@@ -20,6 +20,8 @@ long tot_cntx_switches=0;
 double avg_turn_time=0;
 double avg_resp_time=0;
 static long completed_threads = 0;
+static long responded_threads = 0;
+static int cfs_total_threads = 0;
 
 // === Library state ===
 static ucontext_t scheduler_context;
@@ -42,7 +44,7 @@ static struct itimerval t_intval; // interval + current value for ITIMER_PROF
 static void schedule(void);
 static void _trampoline(void);
 static void t_handler(int signal_num);
-static void t_ms_start(int quantum_ms);
+static void t_ms_start(void);
 
 /* ready-queue */
 static void rq_init(ready_queue_t *q);
@@ -52,6 +54,7 @@ static tcb* rq_dequeue(void);
 /* registry */
 static void registry_add(tcb *t);
 static tcb* find_tcb(worker_t tid);
+static void registry_remove(worker_t tid);
 
 /* scheduler algorithm prototypes so schedule() can call them */
 static void sched_psjf(void);
@@ -132,16 +135,29 @@ static void cfs_heap_sift_up(cfs_min_heap_t *h, int idx) {
 }
 
 static void cfs_heap_init(cfs_min_heap_t *h, int initial_capacity) {
+    if (initial_capacity <= 0) initial_capacity = 16;
+    
     h->heap_array = malloc(initial_capacity * sizeof(tcb*));
-    if (!h->heap_array) { exit(1); }
+    if (!h->heap_array) { 
+        perror("malloc cfs_heap_init");
+        exit(1); 
+    }
     h->capacity = initial_capacity;
     h->size = 0;
 }
 
 static void cfs_heap_insert(cfs_min_heap_t *h, tcb *t) {
     if (h->size == h->capacity) {
-        fprintf(stderr, "CFS heap full, resizing not implemented.\n");
-        return; 
+        int new_capacity = h->capacity * 2;
+        tcb **new_heap_array = realloc(h->heap_array, new_capacity * sizeof(tcb*));
+        
+        if (!new_heap_array) {
+            perror("realloc cfs_heap_insert");
+            exit(1);
+        }
+        
+        h->heap_array = new_heap_array;
+        h->capacity = new_capacity;
     }
 
     h->heap_array[h->size] = t;
@@ -244,6 +260,23 @@ static tcb* find_tcb(worker_t tid) {
     return NULL;
 }
 
+static void registry_remove(worker_t tid) {
+    tcb *prev = NULL;
+    tcb *iter = all_threads;
+    while (iter) {
+        if (iter->t_id == tid) {
+            if (prev) {
+                prev->register_next = iter->register_next;
+            } else {
+                all_threads = iter->register_next;
+            }
+            return;
+        }
+        prev = iter;
+        iter = iter->register_next;
+    }
+}
+
 /* =========================================================================
  * Mutex wait-queue helpers (Part 1.5)
  * ========================================================================= */
@@ -279,7 +312,7 @@ static inline void convert_ms_itimerval(int ms, struct timeval *t_val) {
     t_val->tv_usec = (ms % 1000) * 1000;
 }
 
-static void t_ms_start(int quantum_ms) {
+static void t_ms_start() {
     // 1) Install the SIGPROF handler *via sigaction()
     memset(&sig_a, 0, sizeof(sig_a));
     sig_a.sa_handler = t_handler;
@@ -287,16 +320,6 @@ static void t_ms_start(int quantum_ms) {
     sig_a.sa_flags = SA_RESTART; // auto-restart some syscalls
     if (sigaction(SIGPROF, &sig_a, NULL) != 0) {
         perror("sigaction(SIGPROF)");
-        exit(1);
-    }
-
-    // Program ITIMER_PROF: periodic firing
-    memset(&t_intval, 0, sizeof(t_intval));
-    convert_ms_itimerval(quantum_ms, &t_intval.it_value);
-    convert_ms_itimerval(quantum_ms, &t_intval.it_interval);
-
-    if (setitimer(ITIMER_PROF, &t_intval, NULL) != 0) {
-        perror("setitimer(ITIMER_PROF)");
         exit(1);
     }
 }
@@ -366,15 +389,25 @@ int worker_create(worker_t * thread, pthread_attr_t * attr, void *(*function)(vo
         // capture main context so the scheduler can return to it
         getcontext(&main_context);
 
-        // build scheduler context + stack
-        // ... (rest of the initializer is okay) ...
+        getcontext(&scheduler_context); // Initialize the context structure
+        
+        // Allocate a stack for the scheduler
+        scheduler_context.uc_stack.ss_sp = malloc(STACK_BYTES);
+        if (!scheduler_context.uc_stack.ss_sp) {
+            perror("Failed to allocate scheduler stack");
+            exit(1); // Cannot continue if scheduler has no stack
+        }
+        scheduler_context.uc_stack.ss_size = STACK_BYTES;
+        
+        // Set its link back to main_context (for when scheduler is done)
+        scheduler_context.uc_link = &main_context;
         makecontext(&scheduler_context, schedule, 0);
 
         // 1.1.5 Timers: arm the periodic preemption timer
         // NOTE: Timer start might need adjustment depending on scheduler
         // For MLFQ/CFS, the *first* timer interval might be set by the scheduler itself.
         // For simplicity, we start it here, but schedulers will override `it_value`.
-        t_ms_start(QUANTUM); // QUANTUM is a default, schedulers will set specifics
+        t_ms_start();
     }
     
     // 1) allocate space of stack for this thread to run
@@ -408,12 +441,23 @@ int worker_create(worker_t * thread, pthread_attr_t * attr, void *(*function)(vo
 
     gettimeofday(&t->creation_time, NULL);
 
+    sigset_t oldset, blockset;
+    sigemptyset(&blockset);
+    sigaddset(&blockset, SIGPROF);
+    sigprocmask(SIG_BLOCK, &blockset, &oldset);
+
+    #if defined(CFS)
+        cfs_total_threads++; // <-- ADD THIS
+    #endif
+
     // Register so joins/exits can find it even when not on run queue
     registry_add(t);
     
     // Inline Enqueue to push READY tcb 't' to tail of run_queue
     // 1.1.4 rq_enqueue(t);
     scheduler_enqueue(t);
+
+    sigprocmask(SIG_SETMASK, &oldset, NULL);
 
     if (thread) {
         *thread = t->t_id;
@@ -451,9 +495,14 @@ void worker_yield(void) {
 	curr = NULL; 	// no current while the scheduler runs
 
 	sigprocmask(SIG_SETMASK, &oldset, NULL);
-    swapcontext(&me->context, &scheduler_context);
-    perror("swapcontext failed in worker_yield (worker)");
-    abort();
+    
+    // Check if the *initial* swap failed
+    if (swapcontext(&me->context, &scheduler_context) == -1) {
+        perror("swapcontext failed in worker_yield (worker)");
+        abort();
+    }
+
+    return;
 };
 
 /* terminate a thread */
@@ -485,15 +534,13 @@ void worker_exit(void *value_ptr) {
     unsigned long first_run_us = me->first_run_time.tv_sec * 1000000UL + me->first_run_time.tv_usec;
     unsigned long complete_us = me->completion_time.tv_sec * 1000000UL + me->completion_time.tv_usec;
 
-    if (me->has_run_before) {
-        unsigned long new_turnaround_time_us = complete_us - create_us;
-        unsigned long new_response_time_us = first_run_us - create_us;
+    unsigned long new_turnaround_time_us = complete_us - create_us;
+    avg_turn_time = (avg_turn_time * completed_threads + (new_turnaround_time_us / 1000.0)) / (completed_threads + 1);
+    completed_threads++;
 
-        avg_turn_time = (avg_turn_time * completed_threads + (new_turnaround_time_us / 1000.0)) / (completed_threads + 1);
-        avg_resp_time = (avg_resp_time * completed_threads + (new_response_time_us / 1000.0)) / (completed_threads + 1);
-
-        completed_threads++;
-    }
+    #if defined(CFS)
+        cfs_total_threads--;
+    #endif
 
     // unblock signals
     sigprocmask(SIG_SETMASK, &oldset, NULL);
@@ -521,6 +568,13 @@ void worker_exit(void *value_ptr) {
     }
 	
 	// 4) This thread is done running; clear 'curr' so the scheduler owns the CPU.
+
+    if (me->joiner_tid == 0) {
+        registry_remove(me->t_id);
+        free(me->stack);
+        free(me);
+    }
+
 	curr = NULL;
 
     setcontext(&scheduler_context);
@@ -541,27 +595,49 @@ int worker_join(worker_t thread, void **value_ptr) {
 	if (!target) { errno = ESRCH; return -1; } // no such thread
 	if (curr && curr->t_id == thread) {errno = EDEADLK; return -1;} // self-join would deadlock
 
+    sigset_t oldset, blockset;
+    sigemptyset(&blockset);
+    sigaddset(&blockset, SIGPROF);
+    sigprocmask(SIG_BLOCK, &blockset, &oldset);
+
 	// 2. If target already finished, harvest result and free resources
 	if (target->status == T_COMPLETED) {
 		if (value_ptr) *value_ptr = target->return_value;
+
+        registry_remove(thread);
 		free(target->stack);
+        free(target);
+
+        sigprocmask(SIG_SETMASK, &oldset, NULL);
 		return 0;
 	}
 
 	if (curr) {
 		// 3. Record the join relationship
+        if (target->joiner_tid != 0) {
+            errno = EINVAL;
+            sigprocmask(SIG_SETMASK, &oldset, NULL);
+            return -1;
+        }
+
 		target->joiner_tid = curr->t_id;  // target knows who to wake
 		curr->waiting_on = thread;  	// caller records who it waits for 
 		curr->status = T_BLOCKED;
+
+        sigprocmask(SIG_SETMASK, &oldset, NULL);
 
 		// 4. Switch to the scheduler; we’ll resume once target calls worker_exit
 		swapcontext(&curr->context, &scheduler_context);
 	} else {
 		// main thread joins → run scheduler until target completes
 		while (target->status != T_COMPLETED) {
-			swapcontext(&main_context, &scheduler_context);
+			sigprocmask(SIG_SETMASK, &oldset, NULL);
+            swapcontext(&main_context, &scheduler_context);
+            sigprocmask(SIG_BLOCK, &blockset, &oldset);
 		}
 	}
+
+    sigprocmask(SIG_SETMASK, &oldset, NULL);
 
 	// 5. resumed: target should be COMPLETED now
 	target = find_tcb(thread);
@@ -569,7 +645,11 @@ int worker_join(worker_t thread, void **value_ptr) {
 		if (value_ptr) {
 			*value_ptr = target->return_value;
 		}
-		free(target->stack);
+
+		registry_remove(thread);
+        free(target->stack);
+        free(target);
+
 		return 0;
 	}
 
@@ -612,9 +692,11 @@ int worker_mutex_lock(worker_mutex_t *mutex) {
     sigaddset(&blockset, SIGPROF);
     sigprocmask(SIG_BLOCK, &blockset, &oldset);
 
+    worker_t expected_owner = curr ? curr->t_id : MAIN_OWNER;
+
     // fast path
     if (mutex->owner == 0) {
-        mutex->owner = curr->t_id;
+        mutex->owner = expected_owner;
         sigprocmask(SIG_SETMASK, &oldset, NULL);
         return 0;
     }
@@ -633,6 +715,7 @@ int worker_mutex_lock(worker_mutex_t *mutex) {
         errno = EPERM; 
         return -1;
     }
+    mutex->owner = me->t_id;
     return 0;
 };
 
@@ -746,7 +829,7 @@ static void sched_psjf() {
     unsigned long min_run = min_node->run_time_us;
 
     while (iter) {
-        if (iter->run_time_us < min_run) {
+        if (iter->run_time_us < min_run || (iter->run_time_us == min_run && iter->t_id < min_node->t_id)) {
             min_run = iter->run_time_us;
             min_node = iter;
             min_prev = prev;
@@ -786,6 +869,13 @@ static void sched_psjf() {
     if (!curr->has_run_before) {
         curr->first_run_time = curr->last_start_time;
         curr->has_run_before = true;
+
+        unsigned long create_us = curr->creation_time.tv_sec * 1000000UL + curr->creation_time.tv_usec;
+        unsigned long first_run_us = curr->first_run_time.tv_sec * 1000000UL + curr->first_run_time.tv_usec;
+        unsigned long new_response_time_us = first_run_us - create_us;
+
+        avg_resp_time = (avg_resp_time * responded_threads + (new_response_time_us / 1000.0)) / (responded_threads + 1);
+        responded_threads++;
     }
 
     sigprocmask(SIG_SETMASK, &oldset, NULL);
@@ -822,7 +912,7 @@ static void sched_mlfq() {
         unsigned long elapsed_us = (now.tv_sec - quantum_start_time.tv_sec) * 1000000UL + (now.tv_usec - quantum_start_time.tv_usec);
         
         curr->quantum_allotment_us += elapsed_us;
-        
+
         if (curr->status == T_PREEMPTED) {
             unsigned long allotment_for_level_us = mlfq_time_slice_ms[curr->priority] * 1000UL;
 
@@ -839,7 +929,6 @@ static void sched_mlfq() {
         } else if (curr->status == T_READY) {
             scheduler_enqueue(curr);
         } else if (curr->status == T_BLOCKED) {
-             curr->quantum_allotment_us = 0;
         }
         
         curr = NULL;
@@ -887,18 +976,26 @@ static void sched_mlfq() {
     if (!curr->has_run_before) {
         curr->first_run_time = quantum_start_time;
         curr->has_run_before = true;
+
+        unsigned long create_us = curr->creation_time.tv_sec * 1000000UL + curr->creation_time.tv_usec;
+        unsigned long first_run_us = curr->first_run_time.tv_sec * 1000000UL + curr->first_run_time.tv_usec;
+        unsigned long new_response_time_us = first_run_us - create_us;
+
+        avg_resp_time = (avg_resp_time * responded_threads + (new_response_time_us / 1000.0)) / (responded_threads + 1);
+        responded_threads++;
     }
 
     unsigned long time_slice_us = mlfq_time_slice_ms[curr->priority] * 1000UL;
     struct itimerval next_timer;
     next_timer.it_value.tv_sec = time_slice_us / 1000000UL;
     next_timer.it_value.tv_usec = time_slice_us % 1000000UL;
-    next_timer.it_interval.tv_sec = 0;  // One-shot timer
+    next_timer.it_interval.tv_sec = 0;
     next_timer.it_interval.tv_usec = 0;
 
     setitimer(ITIMER_PROF, &next_timer, NULL);
 
-    sigprocmask(SIG_SETMASK, &oldset, NULL); // Restore signal mask before switching
+    sigprocmask(SIG_SETMASK, &oldset, NULL);
+    curr->quantum_allotment_us = 0;
     setcontext(&curr->context);
     perror("setcontext failed in sched_mlfq");
     abort();
@@ -942,7 +1039,7 @@ static void sched_cfs(){
         curr->vruntime_us += elapsed_us;
 
         // Step 2
-        if (curr->status == T_PREEMPTED || curr->status == T_READY) {
+        if (curr->status != T_COMPLETED && curr->status != T_BLOCKED) {
             curr->status = T_READY;
             scheduler_enqueue(curr);
         }
@@ -970,17 +1067,28 @@ static void sched_cfs(){
     if (!curr->has_run_before) {
         curr->first_run_time = quantum_start_time;
         curr->has_run_before = true;
+
+        unsigned long create_us = curr->creation_time.tv_sec * 1000000UL + curr->creation_time.tv_usec;
+        unsigned long first_run_us = curr->first_run_time.tv_sec * 1000000UL + curr->first_run_time.tv_usec;
+        unsigned long new_response_time_us = first_run_us - create_us;
+
+        avg_resp_time = (avg_resp_time * responded_threads + (new_response_time_us / 1000.0)) / (responded_threads + 1);
+        responded_threads++;
     }
 
     // Step 4 and 5
-    int num_runnable = cfs_heap_size(&cfs_runqueue) + 1; // +1 for the thread we just popped
+    int num_runnable = cfs_total_threads;
+    if (num_runnable <= 0) {
+        num_runnable = 1;
+    }
+
     unsigned long target_latency_us = TARGET_LATENCY * 1000UL; // Convert ms to us
     unsigned long min_granularity_us = MIN_SCHED_GRN * 1000UL; // Convert ms to us
 
-    unsigned long time_slice_us = target_latency_us / num_runnable; [cite: 189]
+    unsigned long time_slice_us = target_latency_us / num_runnable;
 
-    if (time_slice_us < min_granularity_us) { [cite: 191]
-        time_slice_us = min_granularity_us; [cite: 192]
+    if (time_slice_us < min_granularity_us) {
+        time_slice_us = min_granularity_us;
     }
 
     // Step 6
