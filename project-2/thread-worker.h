@@ -1,8 +1,8 @@
 // File:	worker_t.h
 
-// List all group member's name: Kelvin Ihezue,...
-// username of iLab: ki120
-// iLab Server:
+// List all group member's name: Kelvin Ihezue, Bryan Shangguan
+// username of iLab: ki120, bys8
+
 #ifndef WORKER_T_H
 #define WORKER_T_H
 
@@ -15,7 +15,7 @@
 #define _GNU_SOURCE
 
 /* To use Linux pthread Library in Benchmark, you have to comment the USE_WORKERS macro */
-// #define USE_WORKERS 1
+#define USE_WORKERS 1
 
 /* Targeted latency in milliseconds */
 #define TARGET_LATENCY   20  
@@ -48,11 +48,12 @@ typedef enum {
 	T_READY = 0,
 	T_RUNNING,
 	T_BLOCKED,
-	T_COMPLETED
+	T_COMPLETED,
+	T_PREEMPTED
 }thread_status_t;
 
 
-typedef struct TCB {
+typedef struct tcb {
 	/* add important states in a thread control block */
 	// thread Id
 	// thread status
@@ -72,16 +73,29 @@ typedef struct TCB {
 
 	thread_status_t status; 
 	void 		*return_value;
-	bool 		is_finished;
 
 	// joining relationships
+	bool is_finished;
 	worker_t waiting_on;   // tid this thread is currently joining (0 if none)
 	worker_t joiner_tid;	// tid of the thread joining me (0 if none)
 
+	// scheduling and metrics fields
+    unsigned long run_time_us;
+    unsigned long vruntime_us;
+    int priority; 
+    unsigned long quantum_allotment_us;
+    bool has_run_before;
+
+	// timing metrics
+    struct timeval creation_time;
+    struct timeval first_run_time; 
+    struct timeval last_start_time;
+    struct timeval completion_time;
+
 	// --- separate link pointers for different queues ---
-	struct TCB  *rq_next;      // for ready runqueue
-	struct TCB *register_next; // for global registry of all threads
-	struct TCB *mutex_next;      // for mutex wait queues (later)
+	struct tcb *rq_next;      // for ready runqueue
+	struct tcb *register_next; // for global registry of all threads
+	struct tcb *mutex_next;      // for mutex wait queues (later)
 
 }tcb;
 
