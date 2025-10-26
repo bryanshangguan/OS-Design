@@ -140,8 +140,11 @@ void worker_exit(void *value_ptr);
 int worker_join(worker_t thread, void **value_ptr);
 
 /* initial the mutex lock */
-int worker_mutex_init(worker_mutex_t *mutex, const pthread_mutexattr_t
-    *mutexattr);
+// dummy pthread_mutexattr_t under USE_WORKERS so this header can compile without including pthread.h
+#ifdef USE_WORKERS
+typedef struct { int __unused; } pthread_mutexattr_t;
+#endif
+int worker_mutex_init(worker_mutex_t *mutex, const pthread_mutexattr_t *mutexattr);
 
 /* aquire the mutex lock */
 int worker_mutex_lock(worker_mutex_t *mutex);

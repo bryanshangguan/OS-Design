@@ -68,9 +68,6 @@ static const unsigned long mlfq_time_slice_ms[NUM_LEVELS] = {10, 20, 40, 80};
 static struct timeval last_boost_time = {0};
 
 static void mlfq_enqueue(tcb *t);
-static tcb* mlfq_dequeue(void);
-static void cfs_heap_insert(tcb *t);
-static tcb* cfs_heap_pop_min(void);
 
 // for CFS
 typedef struct {
@@ -482,9 +479,11 @@ void worker_yield(void) {
 
 	if (!curr) {
         sigprocmask(SIG_SETMASK, &oldset, NULL);
-        swapcontext(&main_context, &scheduler_context);
-        perror("swapcontext failed in worker_yield (main)");
-        abort();
+        if (swapcontext(&main_context, &scheduler_context) == -1) {
+            perror("swapcontext failed in worker_yield (main)");
+            abort();
+        }
+        return;
     }
 
 	curr->status = T_READY;
@@ -605,8 +604,10 @@ int worker_join(worker_t thread, void **value_ptr) {
         sigprocmask(SIG_SETMASK, &oldset, NULL);
         return -1;
     }
-    
-    target->joiner_tid = curr ? curr->t_id : MAIN_OWNER;
+
+    if (!curr) {
+        target->joiner_tid = MAIN_OWNER;
+    }
 
 	// 2. If target already finished, harvest result and free resources
 	if (target->status == T_COMPLETED) {
@@ -620,24 +621,18 @@ int worker_join(worker_t thread, void **value_ptr) {
 		return 0;
 	}
 
-	if (curr) {
-		// 3. Record the join relationship
-        if (target->joiner_tid != 0) {
-            errno = EINVAL;
-            sigprocmask(SIG_SETMASK, &oldset, NULL);
-            return -1;
-        }
-
-		target->joiner_tid = curr->t_id;  // target knows who to wake
-		curr->waiting_on = thread;  	// caller records who it waits for 
-		curr->status = T_BLOCKED;
+    if (curr) {
+        // 3. Record the join relationship (worker join)
+        target->joiner_tid = curr->t_id;
+        curr->waiting_on = thread;
+        curr->status = T_BLOCKED;
 
         sigprocmask(SIG_SETMASK, &oldset, NULL);
 
-		// 4. Switch to the scheduler; we’ll resume once target calls worker_exit
-		swapcontext(&curr->context, &scheduler_context);
-	} else {
-		// main thread joins → run scheduler until target completes
+        // 4. Switch to the scheduler; we’ll resume once target calls worker_exit
+        swapcontext(&curr->context, &scheduler_context);
+    } else {
+		// main thread joins, run scheduler until target completes
 		while (target->status != T_COMPLETED) {
 			sigprocmask(SIG_SETMASK, &oldset, NULL);
             swapcontext(&main_context, &scheduler_context);
@@ -678,7 +673,7 @@ int worker_mutex_init(worker_mutex_t *mutex,
 	// YOUR CODE HERE
 	if (!mutex) {errno = EINVAL; return -1;}
 
-	mutex->owner = 0; 		// unlocked
+	mutex->owner = 0;
     mutex->queue_head = NULL;
 	mutex->queue_tail = NULL; 
 	mutex->init = 1;
@@ -694,6 +689,10 @@ int worker_mutex_lock(worker_mutex_t *mutex) {
     // context switch to the scheduler thread
 
     // YOUR CODE HERE
+    if (!mutex || !mutex->init) {
+        errno = EINVAL;
+        return -1;
+    }
 
     sigset_t oldset, blockset;
     sigemptyset(&blockset);
@@ -701,6 +700,13 @@ int worker_mutex_lock(worker_mutex_t *mutex) {
     sigprocmask(SIG_BLOCK, &blockset, &oldset);
 
     worker_t expected_owner = curr ? curr->t_id : MAIN_OWNER;
+
+    // same owner trying to relock should fail
+    if (mutex->owner == expected_owner && expected_owner != 0) {
+        errno = EDEADLK;
+        sigprocmask(SIG_SETMASK, &oldset, NULL);
+        return -1;
+    }
 
     // fast path
     if (mutex->owner == 0) {
@@ -745,21 +751,22 @@ int worker_mutex_unlock(worker_mutex_t *mutex) {
 	// - put threads in block list to run queue 
 	// so that they could compete for mutex later.
 
-	// YOUR CODE HERE
-	if (!mutex || !mutex->init) {errno = EINVAL; return -1;}
-    
+    // YOUR CODE HERE
+    if (!mutex || !mutex->init) {errno = EINVAL; return -1;}
+
     sigset_t oldset, blockset;
+    // block signals before checking/modifying mutex owner and queues
+    sigemptyset(&blockset);
+    sigaddset(&blockset, SIGPROF);
+    sigprocmask(SIG_BLOCK, &blockset, &oldset);
+
     worker_t expected_owner = curr ? curr->t_id : MAIN_OWNER;
 
     if (mutex->owner != expected_owner) {
         errno = EPERM;
+        sigprocmask(SIG_SETMASK, &oldset, NULL);
         return -1;
     }
-
-	// block signals before checking/modifying mutex queue and ready queue
-    sigemptyset(&blockset);
-    sigaddset(&blockset, SIGPROF);
-    sigprocmask(SIG_BLOCK, &blockset, &oldset);
 
     tcb *next_owner = mutex_dequeue(mutex);
     if (next_owner) {
