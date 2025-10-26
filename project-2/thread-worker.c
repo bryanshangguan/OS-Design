@@ -292,11 +292,10 @@ static inline tcb* mutex_dequeue(worker_mutex_t *m) {
 // }
 
 static void t_ms_start() {
-    // 1) Install the SIGPROF handler *via sigaction()
     memset(&sig_a, 0, sizeof(sig_a));
     sig_a.sa_handler = t_handler;
     sigemptyset(&sig_a.sa_mask);
-    sig_a.sa_flags = SA_RESTART; // auto-restart some syscalls
+    sig_a.sa_flags = SA_RESTART;
     if (sigaction(SIGPROF, &sig_a, NULL) != 0) {
         perror("sigaction(SIGPROF)");
         exit(1);
@@ -352,33 +351,39 @@ int worker_create(worker_t * thread, pthread_attr_t * attr, void *(*function)(vo
 
     // YOUR CODE HERE
 
-    // --- ONE_TIME LIBRARY INITIALIZER (inline) ---
     if (!library_init) {
         library_init = 1;
 
-        // Initialize structures for ALL schedulers
-        rq_init(&run_queue); // For PSJF
-        for (int i = 0; i < NUM_LEVELS; ++i) { // For MLFQ
+        // initialize structures for aLL schedulers
+        // for PSJF
+        rq_init(&run_queue);
+
+        // for MLFQ
+        for (int i = 0; i < NUM_LEVELS; ++i) {
             rq_init(&mlfq_queues[i]);
         }
-        cfs_heap_init(&cfs_runqueue, 100); // For CFS (adjust capacity)
-        gettimeofday(&last_boost_time, NULL); // Init boost timer for MLFQ
+
+        // for CFS
+        cfs_heap_init(&cfs_runqueue, 100); 
+
+        // initial boost timer for MLFQ
+        gettimeofday(&last_boost_time, NULL);
 
 
         // capture main context so the scheduler can return to it
         getcontext(&main_context);
 
-        getcontext(&scheduler_context); // Initialize the context structure
+        getcontext(&scheduler_context); // initialize the context structure
         
-        // Allocate a stack for the scheduler
+        // allocate a stack for the scheduler
         scheduler_context.uc_stack.ss_sp = malloc(STACK_BYTES);
         if (!scheduler_context.uc_stack.ss_sp) {
             perror("Failed to allocate scheduler stack");
-            exit(1); // Cannot continue if scheduler has no stack
+            exit(1);
         }
         scheduler_context.uc_stack.ss_size = STACK_BYTES;
         
-        // Set its link back to main_context (for when scheduler is done)
+        // set link back to main_context
         scheduler_context.uc_link = &main_context;
         makecontext(&scheduler_context, schedule, 0);
 
@@ -397,7 +402,7 @@ int worker_create(worker_t * thread, pthread_attr_t * attr, void *(*function)(vo
     t->status = T_READY;
     t->is_finished  = false;
     t->return_value = NULL;
-    t->joiner_tid = 0; // Num of threads joined
+    t->joiner_tid = 0;
     t->waiting_on = 0;
 
     // 2) create and initialize the context of this worker thread
@@ -426,13 +431,12 @@ int worker_create(worker_t * thread, pthread_attr_t * attr, void *(*function)(vo
     sigprocmask(SIG_BLOCK, &blockset, &oldset);
 
     #if defined(CFS)
-        cfs_total_threads++; // <-- ADD THIS
+        cfs_total_threads++;
     #endif
 
-    // Register so joins/exits can find it even when not on run queue
+    // register so joins/exits can find it even when not on run queue
     registry_add(t);
     
-    // Inline Enqueue to push READY tcb 't' to tail of run_queue
     // 1.1.4 rq_enqueue(t);
     scheduler_enqueue(t);
 
@@ -472,12 +476,12 @@ void worker_yield(void) {
 	// rq_enqueue(curr);
     scheduler_enqueue(curr);
 
-	tcb *me = curr; // me points to the same TCB as curr
-	curr = NULL; 	// no current while the scheduler runs
+	tcb *me = curr;
+	curr = NULL;
 
 	sigprocmask(SIG_SETMASK, &oldset, NULL);
     
-    // Check if the *initial* swap failed
+    // check if the initial swap failed
     if (swapcontext(&me->context, &scheduler_context) == -1) {
         perror("swapcontext failed in worker_yield (worker)");
         abort();
@@ -497,7 +501,7 @@ void worker_exit(void *value_ptr) {
 		abort();
 	};
 
-	// Keep a local alias; after we null out 'curr' we still need this TCB.
+	// keep a local alias after we null out 'curr we still need this TCB
 	tcb *me = curr;
 
 	// 1) Save the return value passed by the thread function
@@ -512,7 +516,6 @@ void worker_exit(void *value_ptr) {
     gettimeofday(&me->completion_time, NULL);
 
     unsigned long create_us = me->creation_time.tv_sec * 1000000UL + me->creation_time.tv_usec;
-    unsigned long first_run_us = me->first_run_time.tv_sec * 1000000UL + me->first_run_time.tv_usec;
     unsigned long complete_us = me->completion_time.tv_sec * 1000000UL + me->completion_time.tv_usec;
 
     unsigned long new_turnaround_time_us = complete_us - create_us;
@@ -565,7 +568,7 @@ int worker_join(worker_t thread, void **value_ptr) {
   
 	// YOUR CODE HERE
 
-	// 1. Lookup & basic validation (find target)
+	// 1. Lookup & basic validation
 	tcb *target = find_tcb(thread);
 	if (!target) { errno = ESRCH; return -1; } // no such thread
 	if (curr && curr->t_id == thread) {errno = EDEADLK; return -1;} // self-join would deadlock
@@ -764,9 +767,6 @@ int worker_mutex_destroy(worker_mutex_t *mutex) {
 	if (!mutex || !mutex->init) {errno = EINVAL; return -1;}
 	if (mutex->owner != 0 || mutex->queue_head != NULL) {errno = EBUSY; return -1;}
 
-	// No dynamic memory was allocated inside the struct, so nothing to free.
-    // Just mark it deinitialized and clear fields to a known state.
-
 	mutex->init = 0;
 	mutex->owner = 0;
 	mutex->queue_head = NULL;
@@ -856,10 +856,10 @@ static void sched_psjf() {
     curr->status = T_RUNNING;
     tot_cntx_switches++;
 
-    // set timer for one quantum (QUANTUM is in ms)
+    // set timer for one quantum
     struct itimerval timer;
     memset(&timer, 0, sizeof(timer));
-    // convert QUANTUM ms to sec/usec
+    // convert quantum ms to sec/usec
     timer.it_value.tv_sec  = QUANTUM / 1000;
     timer.it_value.tv_usec = (QUANTUM % 1000) * 1000;
     timer.it_interval.tv_sec = 0;
