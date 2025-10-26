@@ -12,7 +12,7 @@
  * Library global state
  * ========================================================================= */
 
-#define STACK_BYTES SIGSTKSZ(128 * 1024)
+#define STACK_BYTES 128 * 1024
 
 //Global counter for total context switches and 
 //average turn around and response time
