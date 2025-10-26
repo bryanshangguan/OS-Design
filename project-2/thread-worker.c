@@ -12,7 +12,7 @@
  * Library global state
  * ========================================================================= */
 
-#define STACK_BYTES SIGSTKSZ
+#define STACK_BYTES SIGSTKSZ(128 * 1024)
 
 //Global counter for total context switches and 
 //average turn around and response time
@@ -36,7 +36,7 @@ static ready_queue_t run_queue = {0};
 
 // 1.1.5 Timers: globals + handler 
 static struct sigaction sig_a; // signal action for SIGPROF
-static struct itimerval t_intval; // interval + current value for ITIMER_PROF
+// static struct itimerval t_intval; // interval + current value for ITIMER_PROF
 
 /* =========================================================================
  * Forward declarations
@@ -49,7 +49,7 @@ static void t_ms_start(void);
 /* ready-queue */
 static void rq_init(ready_queue_t *q);
 static void rq_enqueue(tcb *t);
-static tcb* rq_dequeue(void);
+// static tcb* rq_dequeue(void);
 
 /* registry */
 static void registry_add(tcb *t);
@@ -79,10 +79,7 @@ typedef struct {
 static cfs_min_heap_t cfs_runqueue = {0};
 static void cfs_heap_init(cfs_min_heap_t *h, int initial_capacity);
 static void cfs_heap_insert(cfs_min_heap_t *h, tcb *t);
-static tcb* cfs_heap_peek_min(const cfs_min_heap_t *h);
 static tcb* cfs_heap_pop_min(cfs_min_heap_t *h);
-static int cfs_heap_size(const cfs_min_heap_t *h);
-static void cfs_heap_destroy(cfs_min_heap_t *h);
 
 static inline int cfs_parent(int i) { return (i - 1) / 2; }
 static inline int cfs_left(int i) { return 2 * i + 1; }
@@ -98,7 +95,7 @@ static inline void mutex_enqueue(worker_mutex_t *m, tcb *t);
 static inline tcb* mutex_dequeue(worker_mutex_t *m);
 
 /* utility for timers */
-static inline void convert_ms_itimerval(int ms, struct timeval *t_val);
+// static inline void convert_ms_itimerval(int ms, struct timeval *t_val);
 
 static inline void cfs_swap(tcb **a, tcb **b) {
     tcb *temp = *a; *a = *b; *b = temp;
@@ -163,11 +160,6 @@ static void cfs_heap_insert(cfs_min_heap_t *h, tcb *t) {
     cfs_heap_sift_up(h, h->size - 1);
 }
 
-static tcb* cfs_heap_peek_min(const cfs_min_heap_t *h) {
-    if (h->size == 0) return NULL;
-    return h->heap_array[0];
-}
-
 static tcb* cfs_heap_pop_min(cfs_min_heap_t *h) {
     if (h->size == 0) return NULL;
 
@@ -179,16 +171,6 @@ static tcb* cfs_heap_pop_min(cfs_min_heap_t *h) {
     cfs_heap_sift_down(h, 0);
 
     return min_tcb;
-}
-
-static int cfs_heap_size(const cfs_min_heap_t *h) {
-    return h->size;
-}
-
-static void cfs_heap_destroy(cfs_min_heap_t *h) {
-    free(h->heap_array);
-    h->size = 0;
-    h->capacity = 0;
 }
 
 // for MLFQ
@@ -232,15 +214,15 @@ static void rq_enqueue(tcb *t) {
 }
 
 // PART 1.1.4
-static tcb* rq_dequeue(void) {
-  tcb *t = run_queue.head;
-  if (!t) return NULL;
-  run_queue.head = t->rq_next;
-  if (!run_queue.head) run_queue.tail = NULL;
-  t->rq_next = NULL;
-  run_queue.length--;
-  return t;
-}
+// static tcb* rq_dequeue(void) {
+//   tcb *t = run_queue.head;
+//   if (!t) return NULL;
+//   run_queue.head = t->rq_next;
+//   if (!run_queue.head) run_queue.tail = NULL;
+//   t->rq_next = NULL;
+//   run_queue.length--;
+//   return t;
+// }
 
 /* =========================================================================
  * Registry helpers (for join/find)
@@ -303,11 +285,11 @@ static inline tcb* mutex_dequeue(worker_mutex_t *m) {
  * ========================================================================= */
 
 // Convert milliseconds to an itimerval {seconds, useconds}
-static inline void convert_ms_itimerval(int ms, struct timeval *t_val) {
-    if (ms < 0) ms = 0;
-    t_val->tv_sec  = ms / 1000;
-    t_val->tv_usec = (ms % 1000) * 1000;
-}
+// static inline void convert_ms_itimerval(int ms, struct timeval *t_val) {
+//     if (ms < 0) ms = 0;
+//     t_val->tv_sec  = ms / 1000;
+//     t_val->tv_usec = (ms % 1000) * 1000;
+// }
 
 static void t_ms_start() {
     // 1) Install the SIGPROF handler *via sigaction()
@@ -567,12 +549,6 @@ void worker_exit(void *value_ptr) {
     }
 	
 	// 4) This thread is done running; clear 'curr' so the scheduler owns the CPU.
-
-    if (me->joiner_tid == 0) {
-        registry_remove(me->t_id);
-        free(me->stack);
-        free(me);
-    }
 
 	curr = NULL;
 
