@@ -1,4 +1,4 @@
-// File:	worker_t.h
+// File:  thread-worker.h
 
 // List all group member's name: Kelvin Ihezue, Bryan Shangguan
 // username of iLab: ki120, bys8

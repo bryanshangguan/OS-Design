@@ -600,6 +600,14 @@ int worker_join(worker_t thread, void **value_ptr) {
     sigaddset(&blockset, SIGPROF);
     sigprocmask(SIG_BLOCK, &blockset, &oldset);
 
+    if (target->joiner_tid != 0) {
+        errno = EINVAL;
+        sigprocmask(SIG_SETMASK, &oldset, NULL);
+        return -1;
+    }
+    
+    target->joiner_tid = curr ? curr->t_id : MAIN_OWNER;
+
 	// 2. If target already finished, harvest result and free resources
 	if (target->status == T_COMPLETED) {
 		if (value_ptr) *value_ptr = target->return_value;
@@ -702,21 +710,33 @@ int worker_mutex_lock(worker_mutex_t *mutex) {
     }
 
     // slow path
-    curr->status = T_BLOCKED;
-    mutex_enqueue(mutex, curr);
-    
-    tcb *me = curr; 
-    curr = NULL;
+    if (curr) {
+        curr->status = T_BLOCKED;
+        mutex_enqueue(mutex, curr);
+        
+        tcb *me = curr; 
+        curr = NULL;
 
-    sigprocmask(SIG_SETMASK, &oldset, NULL); 
-    swapcontext(&me->context, &scheduler_context);
+        sigprocmask(SIG_SETMASK, &oldset, NULL); 
+        swapcontext(&me->context, &scheduler_context);
 
-    if (mutex->owner != me->t_id) {
-        errno = EPERM; 
-        return -1;
+        if (mutex->owner != me->t_id) {
+            errno = EPERM; 
+            return -1;
+        }
+        return 0;
+
+    } else {
+        while (mutex->owner != 0) {
+            sigprocmask(SIG_SETMASK, &oldset, NULL);
+            swapcontext(&main_context, &scheduler_context);
+            sigprocmask(SIG_BLOCK, &blockset, &oldset);
+        }
+
+        mutex->owner = expected_owner;
+        sigprocmask(SIG_SETMASK, &oldset, NULL);
+        return 0;
     }
-    mutex->owner = me->t_id;
-    return 0;
 };
 
 /* release the mutex lock */
