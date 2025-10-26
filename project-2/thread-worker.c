@@ -799,7 +799,6 @@ static void sched_psjf() {
 
     struct timeval now;
     gettimeofday(&now, NULL);
-    unsigned long now_us = (unsigned long)now.tv_sec * 1000000UL + (unsigned long)now.tv_usec;
 
     // Step 1
     if (curr) {
@@ -953,11 +952,9 @@ static void sched_mlfq() {
 
     // Step 4
     tcb *next_thread = NULL;
-    int next_level = -1;
     for (int i = 0; i < NUM_LEVELS; ++i) {
         if (mlfq_queues[i].head != NULL) {
             next_thread = mlfq_dequeue_level(i);
-            next_level = i;
             break;
         }
     }
@@ -1029,7 +1026,6 @@ static void sched_cfs(){
 
     struct timeval now;
     gettimeofday(&now, NULL);
-    unsigned long elapsed_us = 0;
 
     // Step 1
     if (curr) {
