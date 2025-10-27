@@ -1,8 +1,6 @@
 How to run the benchmark?
 -------------------------
 0. Build the library (from project root)
-	``` $ cd project-2 ```
-
 	$ make clean && make SCHED=PSJF
 
 1. Enter the benchmarks folder and build the apps
