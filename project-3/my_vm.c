@@ -19,6 +19,12 @@ struct tlb tlb_store; // Placeholder for your TLB structure
 static unsigned long long tlb_lookups = 0;
 static unsigned long long tlb_misses  = 0;
 
+static int vm_initialized = 0;
+static unsigned char *g_physical_mem = NULL;   // 1 GB simulated physical memory
+static unsigned char *g_phys_bitmap  = NULL;   // 1 bit per physical frame
+static unsigned char *g_virt_bitmap  = NULL;   // 1 bit per virtual page
+static pde_t         *g_pgdir_root   = NULL;   // top-level page directory
+
 // -----------------------------------------------------------------------------
 // Setup
 // -----------------------------------------------------------------------------
@@ -34,6 +40,55 @@ static unsigned long long tlb_misses  = 0;
 void set_physical_mem(void) {
     // TODO: Implement memory allocation for simulated physical memory.
     // Use 32-bit values for sizes, page counts, and offsets.
+
+    if (vm_initialized) return;
+
+    // allocate the simulated 1 GB physical memory
+    g_physical_mem = (unsigned char *)malloc((size_t)MEMSIZE);
+    if (!g_physical_mem) {
+        fprintf(stderr, "set_physical_mem: failed to allocate physical memory\n");
+        return;
+    }
+    memset(g_physical_mem, 0, (size_t)MEMSIZE);
+
+    // allocate bitmaps 1 bit per page/frame
+    const uint32_t phys_frames   = (uint32_t)(NUM_PHYS_FRAMES); // 1GB / 4KB = 262,144
+    const uint32_t virt_pages    = (uint32_t)(NUM_VIRT_PAGES);  // 4GB / 4KB = 1,048,576
+    const size_t   phys_bm_bytes = (size_t)((phys_frames + 7u) / 8u);
+    const size_t   virt_bm_bytes = (size_t)((virt_pages  + 7u) / 8u);
+
+    g_phys_bitmap = (unsigned char *)calloc(phys_bm_bytes, 1);
+    g_virt_bitmap = (unsigned char *)calloc(virt_bm_bytes, 1);
+    if (!g_phys_bitmap || !g_virt_bitmap) {
+        fprintf(stderr, "set_physical_mem: failed to allocate bitmaps\n");
+        free(g_phys_bitmap); g_phys_bitmap = NULL;
+        free(g_virt_bitmap); g_virt_bitmap = NULL;
+        free(g_physical_mem); g_physical_mem = NULL;
+        return;
+    }
+
+    // allocate + clear the top-level page directory (1024 entries)
+    g_pgdir_root = (pde_t *)calloc(PD_ENTRIES, sizeof(pde_t));
+    if (!g_pgdir_root) {
+        fprintf(stderr, "set_physical_mem: failed to allocate page directory\n");
+        free(g_phys_bitmap); g_phys_bitmap = NULL;
+        free(g_virt_bitmap); g_virt_bitmap = NULL;
+        free(g_physical_mem); g_physical_mem = NULL;
+        return;
+    }
+
+    // initialize TLB
+    for (int i = 0; i < TLB_ENTRIES; i++) {
+        tlb_store.valid[i] = false;
+        tlb_store.vpn[i] = 0;
+        tlb_store.pfn[i] = 0;
+        tlb_store.last_used[i] = 0;
+    }
+
+    // reset TLB stats
+    tlb_lookups = 0;
+    tlb_misses  = 0;
+    vm_initialized = 1;
 }
 
 // -----------------------------------------------------------------------------
