@@ -13,4 +13,9 @@
     make test
     ```
 
+- To clean up after running
+    ```
+    make clean
+    ```
+
 
