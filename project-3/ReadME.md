@@ -10,7 +10,7 @@
 
 - Build and run all tests:
     ``` 
-        make test
+    make test
     ```
 
 
