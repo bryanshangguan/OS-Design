@@ -70,6 +70,9 @@ int main(void) {
     n_free(b, ARRAY_SIZE);
     n_free(c, ARRAY_SIZE);
 
+    // --- TLB stats for this benchmark run ---
+    print_TLB_missrate();
+
     printf("Checking if allocations were freed!\n");
     a = n_malloc(ARRAY_SIZE);
     if (VA2U(a) == old_a)

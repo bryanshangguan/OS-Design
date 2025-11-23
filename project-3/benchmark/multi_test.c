@@ -146,6 +146,9 @@ int main() {
     for (int i = 0; i < num_threads; i++)
         pthread_join(threads[i], NULL);
 
+    // --- TLB stats for multi-threaded benchmark ---
+    print_TLB_missrate();
+    
     // policy-agnostic verification using 32-bit VA printing
     void *probe = n_malloc(alloc_size);
     if (probe != NULL) {
