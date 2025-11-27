@@ -130,6 +130,7 @@ int TLB_add(void *va, void *pa) {
         }
     }
 
+	tlb_store.pfn[idx] = (pfn << PT_SHIFT) | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
     tlb_store.valid[idx] = true;
     tlb_store.vpn[idx] = vpn;
     tlb_store.pfn[idx] = pfn;
@@ -139,7 +140,18 @@ int TLB_add(void *va, void *pa) {
 }
 
 pte_t *TLB_check(void *va) {
-    // mock version
+    pthread_mutex_lock(&tlb_lock);
+    uint64_t vpn = (uint64_t)va >> PT_SHIFT;
+    
+    for (int i = 0; i < TLB_ENTRIES; i++) {
+        if (tlb_store.valid[i] && tlb_store.vpn[i] == vpn) {
+            tlb_store.last_used[i] = ++tlb_time;
+            pte_t *ret = &tlb_store.pfn[i];
+            pthread_mutex_unlock(&tlb_lock);
+            return ret;
+        }
+    }
+    pthread_mutex_unlock(&tlb_lock);
     return NULL;
 }
 
@@ -152,6 +164,13 @@ void print_TLB_missrate(void) {
 pte_t *translate(pde_t *pgdir, void *va) {
     if (!pgdir) return NULL;
     tlb_lookups++;
+
+    pte_t *tlb_result = TLB_check(va);
+    if (tlb_result != NULL) {
+        return tlb_result;
+    }
+
+    tlb_misses++;
     
     uint64_t v = (uint64_t)va;
     

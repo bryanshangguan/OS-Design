@@ -15,6 +15,7 @@
 static pthread_mutex_t phys_bitmap_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t virt_bitmap_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t init_lock        = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t tlb_lock         = PTHREAD_MUTEX_INITIALIZER;
 
 struct tlb tlb_store;
 
@@ -133,9 +134,9 @@ void set_physical_mem(void) {
 // TLB
 int TLB_add(void *va, void *pa)
 {
-    if (!va || !pa) {
-        return -1;
-    }
+    if (!va || !pa) return -1;
+
+    pthread_mutex_lock(&tlb_lock);
 
     uint32_t v   = VA2U(va);
     uint32_t p   = VA2U(pa);
@@ -144,20 +145,21 @@ int TLB_add(void *va, void *pa)
 
     int free_idx = -1;
     int lru_idx  = 0;
-    unsigned long long lru_time_val = (unsigned long long)-1;
+    unsigned long long min_time = (unsigned long long)-1;
 
     for (int i = 0; i < TLB_ENTRIES; i++) {
         if (tlb_store.valid[i]) {
-            // if same VPN is already present, just refresh it
             if (tlb_store.vpn[i] == vpn) {
-                tlb_store.pfn[i]       = pfn;
+                // store the PFN combined with flags so it looks like a PTE
+                tlb_store.pfn[i] = (pfn << PFN_SHIFT) | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
                 tlb_store.last_used[i] = ++tlb_time;
+                pthread_mutex_unlock(&tlb_lock);
                 return 0;
             }
-            // track least recently used entry
-            if (tlb_store.last_used[i] < lru_time_val) {
-                lru_time_val = tlb_store.last_used[i];
-                lru_idx      = i;
+            // find LRU
+            if (tlb_store.last_used[i] < min_time) {
+                min_time = tlb_store.last_used[i];
+                lru_idx = i;
             }
         } else if (free_idx < 0) {
             free_idx = i;
@@ -166,17 +168,34 @@ int TLB_add(void *va, void *pa)
 
     int target_idx = (free_idx >= 0) ? free_idx : lru_idx;
 
-    tlb_store.valid[target_idx]     = true;
-    tlb_store.vpn[target_idx]       = vpn;
-    tlb_store.pfn[target_idx]       = pfn;
+    tlb_store.valid[target_idx] = true;
+    tlb_store.vpn[target_idx] = vpn;
+    tlb_store.pfn[target_idx] = (pfn << PFN_SHIFT) | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
     tlb_store.last_used[target_idx] = ++tlb_time;
 
+    pthread_mutex_unlock(&tlb_lock);
     return 0;
 }
 
 pte_t *TLB_check(void *va) {
-    (void)va;
-    return NULL; // always miss
+    uint32_t v = VA2U(va);
+    uint32_t vpn = v >> OFFBITS;
+
+    pthread_mutex_lock(&tlb_lock); 
+
+    for (int i = 0; i < TLB_ENTRIES; i++) {
+        if (tlb_store.valid[i] && tlb_store.vpn[i] == vpn) {
+            tlb_store.last_used[i] = ++tlb_time;
+            
+            pte_t *match = (pte_t *)&tlb_store.pfn[i];
+            
+            pthread_mutex_unlock(&tlb_lock);
+            return match;
+        }
+    }
+
+    pthread_mutex_unlock(&tlb_lock);
+    return NULL;
 }
 
 void print_TLB_missrate(void) {
@@ -193,12 +212,18 @@ void print_TLB_missrate(void) {
 // page table
 pte_t *translate(pde_t *pgdir, void *va)
 {
-    if (pgdir == NULL) {
-        return NULL;
+    if (pgdir == NULL) return NULL;
+
+    tlb_lookups++;
+
+    // 1. check TLB first
+    pte_t *tlb_result = TLB_check(va);
+    if (tlb_result != NULL) {
+        return tlb_result;
     }
 
-    // count one TLB lookup per translation request
-    tlb_lookups++;
+    // 2. TLB miss -> walk the page table
+    tlb_misses++;
 
     uint32_t v   = VA2U(va);
     uint32_t pdx = PDX(v);
@@ -206,7 +231,6 @@ pte_t *translate(pde_t *pgdir, void *va)
 
     pde_t pde = pgdir[pdx];
     if ((pde & PTE_PRESENT) == 0) {
-        // no mapping for this VA
         return NULL;
     }
 
@@ -217,9 +241,13 @@ pte_t *translate(pde_t *pgdir, void *va)
     pte_t *pte = &pt[ptx];
 
     if (((*pte) & PTE_PRESENT) == 0) {
-        // page not present
         return NULL;
     }
+
+    // 3. update TLB on success
+    uint32_t pfn = (*pte) >> PFN_SHIFT;
+    void* physical_addr = U2VA(pfn * PGSIZE + OFF(v));
+    TLB_add(va, physical_addr);
 
     return pte;
 }
