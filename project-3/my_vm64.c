@@ -379,7 +379,7 @@ void n_free(void *va, int size) {
             pthread_mutex_unlock(&phys_bitmap_lock);
             
             pthread_mutex_lock(&pt_lock);
-            *pte = 0; // Clear PTE
+            *pte = 0; // clear PTE
             pthread_mutex_unlock(&pt_lock);
         }
     }

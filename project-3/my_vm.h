@@ -42,9 +42,6 @@
 #define MAX_MEMSIZE    (1ULL << 32)  // Max virtual memory = 4 GB
 #define MEMSIZE        (1ULL << 30)  // Simulated physical memory = 1 GB
 
-
-//COMPLETE HERE
-
 // --- Constants for bit shifts and masks ---
 #define PTXSHIFT      12u              // Bits to shift for page table index
 #define PDXSHIFT      22u              // Bits to shift for page directory index
@@ -66,37 +63,23 @@
 #define PAGE_ROUND_UP(x)   (((x) + PGSIZE - 1) & ~(PGSIZE - 1))
 #define PAGE_INDEX_FROM_PA(pa) ((uint32_t)(pa) >> OFFBITS)
 
-// -----------------------------------------------------------------------------
-//  Type Definitions
-// -----------------------------------------------------------------------------
+// type Definitions
+typedef uint32_t vaddr32_t;   // simulated 32-bit virtual address
+typedef uint32_t paddr32_t;   // simulated 32-bit physical address
+typedef uint32_t pte_t;       // page table entry
+typedef uint32_t pde_t;       // page directory entry
 
-typedef uint32_t vaddr32_t;   // Simulated 32-bit virtual address
-typedef uint32_t paddr32_t;   // Simulated 32-bit physical address
-typedef uint32_t pte_t;       // Page table entry
-typedef uint32_t pde_t;       // Page directory entry
-
-// -----------------------------------------------------------------------------
-//  Page Table Flags (Students fill as needed)
-// -----------------------------------------------------------------------------
-
+// page table flags
 #define PFN_SHIFT     OFFBITS          // PFN stored above offset bits
-
-// Basic flags (expand later as needed)
 #define PTE_PRESENT   0x001u
 #define PTE_WRITABLE  0x002u
 #define PTE_USER      0x004u
 
-// -----------------------------------------------------------------------------
-//  Address Conversion Helpers (Provided)
-// -----------------------------------------------------------------------------
-
+// address conversion helpers
 static inline vaddr32_t VA2U(void *va)     { return (vaddr32_t)(uintptr_t)va; }
 static inline void*     U2VA(vaddr32_t u)  { return (void*)(uintptr_t)u; }
 
-// -----------------------------------------------------------------------------
-//  TLB Configuration
-// -----------------------------------------------------------------------------
-
+// TLB configuration
 #define TLB_ENTRIES   512   // Default number of TLB entries
 
 struct tlb {
@@ -108,10 +91,7 @@ struct tlb {
 
 extern struct tlb tlb_store;
 
-// -----------------------------------------------------------------------------
-//  Function Prototypes
-// -----------------------------------------------------------------------------
-
+// function prototypes
 /*
  * Initializes physical memory and supporting data structures.
  * Return: None.
@@ -185,22 +165,14 @@ void get_data(void *va, void *val, int size);
  * Return: None.
  */
 void mat_mult(void *mat1, void *mat2, int size, void *answer);
-
-// -----------------------------------------------------------------------------
-//  Bitmap Interface (Physical & Virtual Page Tracking)
-// -----------------------------------------------------------------------------
-// Bitmaps will track allocation status for physical frames and virtual pages.
-// Index corresponds to a frame/page number. Non-zero bit => allocated.
-
 int bitmap_get_next_free(int start_bit, int total_bits);  // returns index or -1
 int bitmap_test(int index, unsigned char *bitmap);        // returns 0/1
 void bitmap_set(int index, unsigned char *bitmap);        // marks allocated
 void bitmap_clear(int index, unsigned char *bitmap);      // marks free
 
-// Convenience: number of physical frames and virtual pages
+// convenience: number of physical frames and virtual pages
 #define NUM_PHYS_FRAMES   (MEMSIZE / PGSIZE)
 #define NUM_VIRT_PAGES    (MAX_MEMSIZE / PGSIZE)
 
 
-#endif // MY_VM_H_INCLUDED
-
+#endif

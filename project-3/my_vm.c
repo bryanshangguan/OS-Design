@@ -6,25 +6,23 @@
 */
 
 #include "my_vm.h"
-#include <string.h>   // optional for memcpy if you later implement put/get
+#include <string.h>
 #include <pthread.h>
 
 #define PT_REGION_SIZE 2048
 #define PT_REGION_START (NUM_PHYS_FRAMES - PT_REGION_SIZE)
 
-// -----------------------------------------------------------------------------
-// Global Declarations (optional)
-// -----------------------------------------------------------------------------
+// global declarations
 static pthread_mutex_t phys_bitmap_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t virt_bitmap_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t init_lock        = PTHREAD_MUTEX_INITIALIZER;
 
-struct tlb tlb_store; // Placeholder for your TLB structure
+struct tlb tlb_store;
 
-// Optional counters for TLB statistics
+// optional counters for TLB statistics
 static unsigned long long tlb_lookups = 0;
 static unsigned long long tlb_misses  = 0;
-// Simple timestamp for LRU replacement in TLB
+// timestamp for LRU replacement in TLB
 static unsigned long long tlb_time    = 0;
 
 static int vm_initialized             = 0;
@@ -33,12 +31,8 @@ static unsigned char *g_phys_bitmap   = NULL;   // 1 bit per physical frame
 static unsigned char *g_virt_bitmap   = NULL;   // 1 bit per virtual page
 static pde_t         *g_pgdir_root    = NULL;   // top-level page directory
 
-// -------------------------------------------------------------
-// Bitmap Helpers
-// -------------------------------------------------------------
+// bitmap helpers
 // Test a bit: 1 if allocated, 0 if free
-
-// ==== Kelvin's part ====
 int bitmap_test(int index, unsigned char *bitmap)
 {
     int byte_idx = index >> 3;      // index / 8
@@ -47,7 +41,7 @@ int bitmap_test(int index, unsigned char *bitmap)
     return (bitmap[byte_idx] & mask) != 0;
 }
 
-// Set a bit to 1 (allocated)
+// set a bit to 1 (allocated)
 void bitmap_set(int index, unsigned char *bitmap)
 {
     int byte_idx = index >> 3;
@@ -56,7 +50,7 @@ void bitmap_set(int index, unsigned char *bitmap)
     bitmap[byte_idx] |= mask;
 }
 
-// Clear a bit to 0 (free)
+// clear a bit to 0 (free)
 void bitmap_clear(int index, unsigned char *bitmap)
 {
     int byte_idx = index >> 3;
@@ -65,10 +59,8 @@ void bitmap_clear(int index, unsigned char *bitmap)
     bitmap[byte_idx] &= (unsigned char)~mask;
 }
 
-// -------------------------------------------------------------
 // Find the next free bit at or after start_bit
 // Return: bit index or -1 if none free
-// -------------------------------------------------------------
 int bitmap_get_next_free(int start_bit, int total_bits)
 {
     for (int bit = start_bit; bit < total_bits; bit++) {
@@ -78,11 +70,7 @@ int bitmap_get_next_free(int start_bit, int total_bits)
     return -1;
 }
 
-// -----------------------------------------------------------------------------
-// Setup
-// -----------------------------------------------------------------------------
-
-// ==== Kelvin  (1) Bitmap + setup layer ====
+// setup
 void set_physical_mem(void) {
 
     /* make initialization thread-safe */
@@ -143,11 +131,7 @@ void set_physical_mem(void) {
     pthread_mutex_unlock(&init_lock);
 }
 
-// -----------------------------------------------------------------------------
 // TLB
-// -----------------------------------------------------------------------------
-
-// Kelvin: Real TLB insertion using LRU replacement
 int TLB_add(void *va, void *pa)
 {
     if (!va || !pa) {
@@ -165,13 +149,13 @@ int TLB_add(void *va, void *pa)
 
     for (int i = 0; i < TLB_ENTRIES; i++) {
         if (tlb_store.valid[i]) {
-            // If same VPN is already present, just refresh it
+            // if same VPN is already present, just refresh it
             if (tlb_store.vpn[i] == vpn) {
                 tlb_store.pfn[i]       = pfn;
                 tlb_store.last_used[i] = ++tlb_time;
                 return 0;
             }
-            // Track least recently used entry
+            // track least recently used entry
             if (tlb_store.last_used[i] < lru_time_val) {
                 lru_time_val = tlb_store.last_used[i];
                 lru_idx      = i;
@@ -191,16 +175,12 @@ int TLB_add(void *va, void *pa)
     return 0;
 }
 
-// Kelvin: Mock version (not used in translate, safe to leave as always-miss)
-pte_t *TLB_check(void *va)
-{
+pte_t *TLB_check(void *va) {
     (void)va;
-    return NULL; // Always miss
+    return NULL; // always miss
 }
 
-// Kelvin: Mock version
-void print_TLB_missrate(void)
-{
+void print_TLB_missrate(void) {
     double miss_rate = 0.0;
     if (tlb_lookups != 0) {
         miss_rate = (double)tlb_misses / (double)tlb_lookups;
@@ -211,19 +191,14 @@ void print_TLB_missrate(void)
         tlb_lookups, tlb_misses, miss_rate);
 }
 
-// -----------------------------------------------------------------------------
-// Page Table
-// -----------------------------------------------------------------------------
-
-// Kelvin: translate now just walks the page tables and counts lookups,
-// compulsory misses are counted in map_page() when we first create mappings.
+// page table
 pte_t *translate(pde_t *pgdir, void *va)
 {
     if (pgdir == NULL) {
         return NULL;
     }
 
-    // Count one TLB lookup per translation request
+    // count one TLB lookup per translation request
     tlb_lookups++;
 
     uint32_t v   = VA2U(va);
@@ -232,7 +207,7 @@ pte_t *translate(pde_t *pgdir, void *va)
 
     pde_t pde = pgdir[pdx];
     if ((pde & PTE_PRESENT) == 0) {
-        // No mapping for this VA
+        // no mapping for this VA
         return NULL;
     }
 
@@ -243,15 +218,13 @@ pte_t *translate(pde_t *pgdir, void *va)
     pte_t *pte = &pt[ptx];
 
     if (((*pte) & PTE_PRESENT) == 0) {
-        // Page not present
+        // page not present
         return NULL;
     }
 
     return pte;
 }
 
-// Kelvin: page mapping; now we also count compulsory TLB misses here
-// and insert the mapping into the TLB.
 int map_page(pde_t *pgdir, void *va, void *pa)
 {
     uint32_t v = VA2U(va);
@@ -260,7 +233,7 @@ int map_page(pde_t *pgdir, void *va, void *pa)
     uint32_t pdx = PDX(v);
     uint32_t ptx = PTX(v);
 
-    // Allocate page table if the PDE is not yet present
+    // allocate page table if the PDE is not yet present
     if ((pgdir[pdx] & PTE_PRESENT) == 0) {
 
         int pt_index = -1;
@@ -295,20 +268,14 @@ int map_page(pde_t *pgdir, void *va, void *pa)
 
     pt[ptx] = (pfn << PFN_SHIFT) | PTE_PRESENT | PTE_WRITABLE;
 
-    // Count one compulsory miss for this newly mapped virtual page
+    // count one compulsory miss for this newly mapped virtual page
     tlb_misses++;
-
-    // Also add this VA→PA mapping into the TLB
     TLB_add(va, pa);
 
     return 0;
 }
 
-// -----------------------------------------------------------------------------
-// Allocation
-// -----------------------------------------------------------------------------
-
-// === Kelvin (2)  Allocation API === 
+// allocation
 void *get_next_avail(int num_pages)
 {
     pthread_mutex_lock(&virt_bitmap_lock);
@@ -347,8 +314,6 @@ void *get_next_avail(int num_pages)
     return NULL;
 }
 
-
-// === Kelvin (2)  Allocation API === 
 void *n_malloc(unsigned int num_bytes)
 {
     if (!vm_initialized) {
@@ -365,7 +330,7 @@ void *n_malloc(unsigned int num_bytes)
         return NULL;
     }
 
-    // Track which PFNs we've allocated so we can roll back on failure
+    // track which PFNs we've allocated so we can roll back on failure
     int allocated_pfns[num_pages];
     for (int i = 0; i < num_pages; i++) {
         allocated_pfns[i] = -1;
@@ -388,7 +353,7 @@ void *n_malloc(unsigned int num_bytes)
 
         if (phys_index < 0) {
 
-            // Roll back any PFNs we already set
+            // roll back any PFNs we already set
             pthread_mutex_lock(&phys_bitmap_lock);
             for (int j = 0; j < p; j++) {
                 if (allocated_pfns[j] >= 0) {
@@ -397,7 +362,7 @@ void *n_malloc(unsigned int num_bytes)
             }
             pthread_mutex_unlock(&phys_bitmap_lock);
 
-            // Roll back virtual pages
+            // roll back virtual pages
             pthread_mutex_lock(&virt_bitmap_lock);
             uint32_t start_vpn = VA2U(va_base) / PGSIZE;
             for (int r = 0; r < num_pages; r++) {
@@ -415,7 +380,7 @@ void *n_malloc(unsigned int num_bytes)
 
         // IMPORTANT: phys lock is NOT held here → no deadlock in map_page
         if (map_page(g_pgdir_root, U2VA(va_page), U2VA(pa)) < 0) {
-            // If mapping fails, roll back everything
+            // if mapping fails, roll back everything
             pthread_mutex_lock(&phys_bitmap_lock);
             for (int j = 0; j <= p; j++) {
                 if (allocated_pfns[j] >= 0) {
@@ -438,8 +403,7 @@ void *n_malloc(unsigned int num_bytes)
     return va_base;
 }
 
-
-// === Kelvin (2)  Allocation API === 
+// deallocation
 void n_free(void *va, int size)
 {
     if (va == NULL || size <= 0) {
@@ -471,12 +435,8 @@ void n_free(void *va, int size)
     pthread_mutex_unlock(&phys_bitmap_lock);
     
 }
+// data movement
 
-// -----------------------------------------------------------------------------
-// Data Movement
-// -----------------------------------------------------------------------------
-
-// ==== Kelvin  (3) Data movement API ====
 int put_data(void *va, void *val, int size)
 {
     if (va == NULL || val == NULL || size <= 0) {
@@ -512,7 +472,6 @@ int put_data(void *va, void *val, int size)
     return 0;
 }
 
-// ==== Kelvin  (3) Data movement API ====
 void get_data(void *va, void *val, int size)
 {
     if (va == NULL || val == NULL || size <= 0) {
@@ -547,11 +506,8 @@ void get_data(void *va, void *val, int size)
     }
 }
 
-// -----------------------------------------------------------------------------
-// Matrix Multiplication
-// -----------------------------------------------------------------------------
-
-// ==== Kelvin  (4) Matrix test ====
+// matrix multiplication
+// matrix test
 void mat_mult(void *mat1, void *mat2, int size, void *answer)
 {
     int i, j, k;

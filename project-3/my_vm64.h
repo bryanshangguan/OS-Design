@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <pthread.h>
 
-//  memory and paging configuration (64-bit)
+// memory and paging configuration (64-bit)
 #define PGSIZE         4096ULL
 #define MEMSIZE        (1ULL << 30) // 1GB physical memory
 #define MAX_MEMSIZE    (1ULL << 48) // 48-bit virtual address space
