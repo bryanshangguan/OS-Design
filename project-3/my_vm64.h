@@ -1,3 +1,9 @@
+/*
+* Course: CS 416/518
+* NetID: ki120, bys8
+* Name: Kelvin Ihezue, Bryan Shangguan
+*/
+
 #ifndef MY_VM64_H_INCLUDED
 #define MY_VM64_H_INCLUDED
 

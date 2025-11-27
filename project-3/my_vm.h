@@ -1,5 +1,4 @@
 /*
-* Add NetID and names of all project partners
 * Course: CS 416/518
 * NetID: ki120, bys8
 * Name: Kelvin Ihezue, Bryan Shangguan
@@ -32,30 +31,28 @@
  * ============================================================================
  */
 
-// -----------------------------------------------------------------------------
-//  Memory and Paging Configuration
-// -----------------------------------------------------------------------------
+// memory and paging configuration
 
-#define VA_BITS        32u           // Simulated virtual address width
-#define PGSIZE         4096u         // Page size = 4 KB
+#define VA_BITS        32u           // simulated virtual address width
+#define PGSIZE         4096u         // page size = 4 KB
 
-#define MAX_MEMSIZE    (1ULL << 32)  // Max virtual memory = 4 GB
-#define MEMSIZE        (1ULL << 30)  // Simulated physical memory = 1 GB
+#define MAX_MEMSIZE    (1ULL << 32)  // max virtual memory = 4 GB
+#define MEMSIZE        (1ULL << 30)  // simulated physical memory = 1 GB
 
-// --- Constants for bit shifts and masks ---
-#define PTXSHIFT      12u              // Bits to shift for page table index
-#define PDXSHIFT      22u              // Bits to shift for page directory index
+// constants for bit shifts and masks
+#define PTXSHIFT      12u              // bits to shift for page table index
+#define PDXSHIFT      22u              // bits to shift for page directory index
 
-#define OFFBITS       12u              // Offset bits for 4KB pages
-#define INDEXBITS     10u              // Bits per level (1024 entries)
+#define OFFBITS       12u              // offset bits for 4KB pages
+#define INDEXBITS     10u              // bits per level (1024 entries)
 
-#define PXMASK        0x3FFu           // Mask for a 10-bit page index
-#define OFFMASK       0xFFFu           // Mask for 12-bit offset
+#define PXMASK        0x3FFu           // mask for a 10-bit page index
+#define OFFMASK       0xFFFu           // mask for 12-bit offset
 
 #define PT_ENTRIES    (PGSIZE/sizeof(pte_t))  // 1024 entries per page table
 #define PD_ENTRIES    (PGSIZE/sizeof(pde_t))  // 1024 entries per directory
 
-// --- Macros to extract address components ---
+// macros to extract address components
 #define PDX(va)       (((uint32_t)(va) >> PDXSHIFT) & PXMASK)
 #define PTX(va)       (((uint32_t)(va) >> PTXSHIFT) & PXMASK)
 #define OFF(va)       ((uint32_t)(va) & OFFMASK)
@@ -63,7 +60,7 @@
 #define PAGE_ROUND_UP(x)   (((x) + PGSIZE - 1) & ~(PGSIZE - 1))
 #define PAGE_INDEX_FROM_PA(pa) ((uint32_t)(pa) >> OFFBITS)
 
-// type Definitions
+// type fefinitions
 typedef uint32_t vaddr32_t;   // simulated 32-bit virtual address
 typedef uint32_t paddr32_t;   // simulated 32-bit physical address
 typedef uint32_t pte_t;       // page table entry
@@ -80,7 +77,7 @@ static inline vaddr32_t VA2U(void *va)     { return (vaddr32_t)(uintptr_t)va; }
 static inline void*     U2VA(vaddr32_t u)  { return (void*)(uintptr_t)u; }
 
 // TLB configuration
-#define TLB_ENTRIES   512   // Default number of TLB entries
+#define TLB_ENTRIES   512   // default number of TLB entries
 
 struct tlb {
     uint32_t vpn[TLB_ENTRIES];
