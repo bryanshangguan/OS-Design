@@ -146,8 +146,6 @@ pte_t *translate(pde_t *pgdir, void *va) {
     if (tlb_result != NULL) {
         return tlb_result;
     }
-
-    tlb_misses++;
     
     uint64_t v = (uint64_t)va;
     

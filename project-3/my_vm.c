@@ -198,9 +198,7 @@ pte_t *translate(pde_t *pgdir, void *va)
     if (tlb_result != NULL) {
         return tlb_result;
     }
-
-    // 2. TLB miss -> walk the page table
-    tlb_misses++;
+    
 
     uint32_t v   = VA2U(va);
     uint32_t pdx = PDX(v);
