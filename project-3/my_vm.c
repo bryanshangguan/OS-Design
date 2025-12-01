@@ -143,12 +143,35 @@ int TLB_add(void *va, void *pa)
     uint32_t vpn = v >> OFFBITS;   // virtual page number
     uint32_t pfn = p >> OFFBITS;   // physical frame number
 
-    uint32_t index = vpn % TLB_ENTRIES;
+    int free_idx = -1;
+    int lru_idx  = 0;
+    unsigned long long min_time = (unsigned long long)-1;
 
-    tlb_store.valid[index] = true;
-    tlb_store.vpn[index] = vpn;
+    for (int i = 0; i < TLB_ENTRIES; i++) {
+        if (tlb_store.valid[i]) {
+            if (tlb_store.vpn[i] == vpn) {
+                // store the PFN combined with flags so it looks like a PTE
+                tlb_store.pfn[i] = (pfn << PFN_SHIFT) | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+                tlb_store.last_used[i] = ++tlb_time;
+                pthread_mutex_unlock(&tlb_lock);
+                return 0;
+            }
+            // find LRU
+            if (tlb_store.last_used[i] < min_time) {
+                min_time = tlb_store.last_used[i];
+                lru_idx = i;
+            }
+        } else if (free_idx < 0) {
+            free_idx = i;
+        }
+    }
 
-    tlb_store.pfn[index] = (pfn << PFN_SHIFT) | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+    int target_idx = (free_idx >= 0) ? free_idx : lru_idx;
+
+    tlb_store.valid[target_idx] = true;
+    tlb_store.vpn[target_idx] = vpn;
+    tlb_store.pfn[target_idx] = (pfn << PFN_SHIFT) | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+    tlb_store.last_used[target_idx] = ++tlb_time;
 
     pthread_mutex_unlock(&tlb_lock);
     return 0;
@@ -157,18 +180,18 @@ int TLB_add(void *va, void *pa)
 pte_t *TLB_check(void *va) {
     uint32_t v = VA2U(va);
     uint32_t vpn = v >> OFFBITS;
-    
-    uint32_t index = vpn % TLB_ENTRIES;
 
-    pthread_mutex_lock(&tlb_lock);
+    pthread_mutex_lock(&tlb_lock); 
 
-    if (tlb_store.valid[index] && tlb_store.vpn[index] == vpn) {
-        tlb_store.last_used[index] = ++tlb_time; 
-        
-        pte_t *match = (pte_t *)&tlb_store.pfn[index];
-        
-        pthread_mutex_unlock(&tlb_lock);
-        return match;
+    for (int i = 0; i < TLB_ENTRIES; i++) {
+        if (tlb_store.valid[i] && tlb_store.vpn[i] == vpn) {
+            tlb_store.last_used[i] = ++tlb_time;
+            
+            pte_t *match = (pte_t *)&tlb_store.pfn[i];
+            
+            pthread_mutex_unlock(&tlb_lock);
+            return match;
+        }
     }
 
     pthread_mutex_unlock(&tlb_lock);
@@ -334,9 +357,8 @@ void *n_malloc(unsigned int num_bytes)
         return NULL;
     }
 
-    int *allocated_pfns = (int *)malloc(num_pages * sizeof(int));
-    if (!allocated_pfns) return NULL;
-
+    // track which PFNs we've allocated so we can roll back on failure
+    int allocated_pfns[num_pages];
     for (int i = 0; i < num_pages; i++) {
         allocated_pfns[i] = -1;
     }
@@ -400,13 +422,11 @@ void *n_malloc(unsigned int num_bytes)
                 bitmap_clear((int)start_vpn + r, g_virt_bitmap);
             }
             pthread_mutex_unlock(&virt_bitmap_lock);
-            
-            free(allocated_pfns);
+
             return NULL;
         }
     }
 
-    free(allocated_pfns);
     return va_base;
 }
 
