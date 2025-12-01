@@ -44,7 +44,7 @@
 #define PT_INDEX(va)   (((uint64_t)(va) >> PT_SHIFT)   & PT_MASK)
 #define OFFSET(va)     ((uint64_t)(va) & OFFSET_MASK)
 
-#define PAGE_ROUND_UP(x)   (((x) + PGSIZE - 1) & ~(PGSIZE - 1))
+#define PAGE_ROUND_UP(x)   ((((uint64_t)(x)) + PGSIZE - 1) & ~(PGSIZE - 1))
 
 // types
 typedef uint64_t pte_t;

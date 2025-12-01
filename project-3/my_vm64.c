@@ -104,54 +104,30 @@ int TLB_add(void *va, void *pa) {
     uint64_t vpn = v >> PT_SHIFT;
     uint64_t pfn = p >> PT_SHIFT;
 
-    // LRU replacement
-    int idx = -1;
-    uint64_t min_time = (uint64_t)-1;
+    unsigned long index = vpn % TLB_ENTRIES;
+
+    tlb_store.valid[index] = true;
+    tlb_store.vpn[index]   = vpn;
     
-    // check if exists
-    for (int i = 0; i < TLB_ENTRIES; i++) {
-        if (tlb_store.valid[i] && tlb_store.vpn[i] == vpn) {
-            tlb_store.pfn[i] = pfn;
-            tlb_store.last_used[i] = ++tlb_time;
-            pthread_mutex_unlock(&tlb_lock);
-            return 0;
-        }
-    }
+    tlb_store.pfn[index]   = (pfn << PT_SHIFT) | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
 
-    // find free or LRU
-    for (int i = 0; i < TLB_ENTRIES; i++) {
-        if (!tlb_store.valid[i]) {
-            idx = i;
-            break;
-        }
-        if (tlb_store.last_used[i] < min_time) {
-            min_time = tlb_store.last_used[i];
-            idx = i;
-        }
-    }
-
-	tlb_store.pfn[idx] = (pfn << PT_SHIFT) | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
-    tlb_store.valid[idx] = true;
-    tlb_store.vpn[idx] = vpn;
-    tlb_store.pfn[idx] = pfn;
-    tlb_store.last_used[idx] = ++tlb_time;
     pthread_mutex_unlock(&tlb_lock);
     return 0;
 }
 
-
 pte_t *TLB_check(void *va) {
     pthread_mutex_lock(&tlb_lock);
     uint64_t vpn = (uint64_t)va >> PT_SHIFT;
-    
-    for (int i = 0; i < TLB_ENTRIES; i++) {
-        if (tlb_store.valid[i] && tlb_store.vpn[i] == vpn) {
-            tlb_store.last_used[i] = ++tlb_time;
-            pte_t *ret = &tlb_store.pfn[i];
-            pthread_mutex_unlock(&tlb_lock);
-            return ret;
-        }
+
+    unsigned long index = vpn % TLB_ENTRIES;
+
+    if (tlb_store.valid[index] && tlb_store.vpn[index] == vpn) {
+        tlb_store.last_used[index] = ++tlb_time;
+        pte_t *ret = &tlb_store.pfn[index];
+        pthread_mutex_unlock(&tlb_lock);
+        return ret;
     }
+
     pthread_mutex_unlock(&tlb_lock);
     return NULL;
 }
