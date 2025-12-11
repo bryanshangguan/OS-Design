@@ -394,11 +394,9 @@ int rufs_mkfs() {
     root.vstat.st_mtime  = now;
     root.vstat.st_ctime  = now;
 
-    // Ask Person B's helper to actually write the inode structure
-    writei(0, &root);
-
     // 8. Save superblock in memory
     sb = newsb;
+    writei(0, &root);
 
 	return 0;
 }
