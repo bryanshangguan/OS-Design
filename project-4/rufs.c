@@ -3,6 +3,8 @@
  *	Rutgers Tiny File System
  *	File:	rufs.c
  *
+ *  List all group member's name: Kelvin Ihezue, Bryan Shangguan
+ *  username of iLab: ki120, bys8
  */
 
 #define FUSE_USE_VERSION 26
@@ -88,7 +90,6 @@ int get_avail_blkno() {
  * inode operations
  */
 
-// Mock Version: **FOR PERSON B**
 int readi(uint16_t ino, struct inode *inode) {
 
 	// Step 1: Get the inode's on-disk block number
@@ -117,7 +118,6 @@ int readi(uint16_t ino, struct inode *inode) {
 	return 0;
 }
 
-// Mock Version: **FOR PERSON B**
 int writei(uint16_t ino, struct inode *inode) {
 
 	// Step 1: Get the block number where this inode resides on disk
