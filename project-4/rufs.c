@@ -218,24 +218,24 @@ int dir_add(struct inode *dir_inode, uint16_t f_ino, const char *fname, size_t n
 	int entries_per_block = BLOCK_SIZE / sizeof(struct dirent);
 
 	struct dirent existing;
-	if (dir_find(dir_inode.ino, fname, name_len, &existing) == 0) {
+	if (dir_find(dir_inode->ino, fname, name_len, &existing) == 0) {
 		return -EEXIST;
 	}
 
 	for (int i = 0; i < 16; i++) {
-		if (dir_inode.direct_ptr[i] == 0) {
+		if (dir_inode->direct_ptr[i] == 0) {
 			int new_blk = get_avail_blkno();
 			if (new_blk < 0) return -ENOSPC;
 			
-			dir_inode.direct_ptr[i] = new_blk;
-			dir_inode.size += BLOCK_SIZE;
+			dir_inode->direct_ptr[i] = new_blk;
+			dir_inode->size += BLOCK_SIZE;
 			
 			memset(block_buf, 0, BLOCK_SIZE);
 			bio_write(new_blk, block_buf);
 		}
 
 		// read block
-		if (bio_read(dir_inode.direct_ptr[i], block_buf) < 0) return -EIO;
+		if (bio_read(dir_inode->direct_ptr[i], block_buf) < 0) return -EIO;
 		
 		dir_entry = (struct dirent *)block_buf;
 
@@ -249,7 +249,7 @@ int dir_add(struct inode *dir_inode, uint16_t f_ino, const char *fname, size_t n
 				dir_entry[j].name[name_len] = '\0';
 				
 				// write block back to disk
-				bio_write(dir_inode.direct_ptr[i], block_buf);
+				bio_write(dir_inode->direct_ptr[i], block_buf);
 				
 				found_spot = 1;
 				break;
@@ -262,8 +262,8 @@ int dir_add(struct inode *dir_inode, uint16_t f_ino, const char *fname, size_t n
 
 	// update directory inode
 	time_t now = time(NULL);
-	dir_inode.vstat.st_mtime = now;
-	dir_inode.vstat.st_atime = now;
+	dir_inode->vstat.st_mtime = now;
+	dir_inode->vstat.st_atime = now;
 	
 	// wite directory inode to disk
 	writei(dir_inode->ino, dir_inode); 
