@@ -210,12 +210,10 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
     return -ENOENT;
 }
 
-int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t name_len) {
-
+int dir_add(struct inode *dir_inode, uint16_t f_ino, const char *fname, size_t name_len) {
 	// Step 1: Read dir_inode's data block and check each directory entry of dir_inode
 	struct dirent *dir_entry;
 	char block_buf[BLOCK_SIZE];
-	int blk_idx = -1;
 	int found_spot = 0;
 	int entries_per_block = BLOCK_SIZE / sizeof(struct dirent);
 
@@ -268,9 +266,8 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 	dir_inode.vstat.st_atime = now;
 	
 	// wite directory inode to disk
-	writei(dir_inode.ino, &dir_inode);
-
-	return 0;
+	writei(dir_inode->ino, dir_inode); 
+    return 0;
 }
 
 
@@ -293,7 +290,6 @@ int get_node_by_path(const char *path, uint16_t ino, struct inode *inode) {
 
     uint16_t curr_ino = root_ino;
     struct dirent de;
-    struct inode curr_inode;
 
     char *saveptr = NULL;
     char *token = strtok_r(tmp, "/", &saveptr);
@@ -582,7 +578,7 @@ static int rufs_mkdir(const char *path, mode_t mode) {
     }
 
     // 5: Add a directory entry to the parent
-    ret = dir_add(parent_inode, (uint16_t)new_ino, name, strlen(name));
+    ret = dir_add(&parent_inode, (uint16_t)new_ino, name, strlen(name));
     if (ret < 0) {
         free(dirc); free(basec);
         return ret;
@@ -655,7 +651,7 @@ static int rufs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     }
 
     // Step 4: Call dir_add() to add directory entry of target file to parent directory
-    ret = dir_add(parent_inode, new_ino, bname, strlen(bname));
+    ret = dir_add(&parent_inode, new_ino, bname, strlen(bname));
     if (ret < 0) {
         free(dirc);
         free(basec);
