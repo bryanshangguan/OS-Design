@@ -25,6 +25,8 @@
 #define TYPE_FILE 1
 #define TYPE_DIR  2
 
+#define root_ino 0
+
 /*
  * Superblock
  */

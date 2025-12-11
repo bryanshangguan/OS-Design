@@ -34,28 +34,54 @@ struct superblock sb;
  * Get available inode number from bitmap
  */
 int get_avail_ino() {
-
 	// Step 1: Read inode bitmap from disk
-	
+	char block_buf[BLOCK_SIZE];
+	if (bio_read(sb.i_bitmap_blk, block_buf) < 0) {
+		return -1;
+	}
+	bitmap_t ibitmap = (bitmap_t)block_buf;
+
 	// Step 2: Traverse inode bitmap to find an available slot
+	for (int i = 0; i < sb.max_inum; i++) {
+		if (get_bitmap(ibitmap, i) == 0) {
+			// Step 3: Update inode bitmap and write to disk 
+			set_bitmap(ibitmap, i);
+			if (bio_write(sb.i_bitmap_blk, block_buf) < 0) {
+				return -1;
+			}
+			return i;
+		}
+	}
 
-	// Step 3: Update inode bitmap and write to disk 
-
-	return 0;
+	// no inodes available
+	return -1;
 }
 
 /* 
  * Get available data block number from bitmap
  */
 int get_avail_blkno() {
+    // Step 1: Read data block bitmap from disk
+	char block_buf[BLOCK_SIZE];
+	if (bio_read(sb.d_bitmap_blk, block_buf) < 0) {
+		return -1;
+	}
+	bitmap_t dbitmap = (bitmap_t)block_buf;
 
-	// Step 1: Read data block bitmap from disk
-	
 	// Step 2: Traverse data block bitmap to find an available slot
+	for (int i = 0; i < sb.max_dnum; i++) {
+		if (get_bitmap(dbitmap, i) == 0) {
+			// Step 3: Update data block bitmap and write to disk 
+			set_bitmap(dbitmap, i);
+			if (bio_write(sb.d_bitmap_blk, block_buf) < 0) {
+				return -1;
+			}
+			// return the absolute block number
+			return sb.d_start_blk + i;
+		}
+	}
 
-	// Step 3: Update data block bitmap and write to disk 
-
-	return 0;
+	return -1;
 }
 
 /* 
@@ -172,8 +198,9 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
 
             if (entries[j].len == (uint16_t)name_len &&
                 strncmp(entries[j].name, fname, name_len) == 0) {
-                if (out) {
-                    *out = entries[j];
+                
+                if (dirent) {
+                    *dirent = entries[j];
                 }
                 return 0; // found
             }
@@ -186,16 +213,62 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
 int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t name_len) {
 
 	// Step 1: Read dir_inode's data block and check each directory entry of dir_inode
+	struct dirent *dir_entry;
+	char block_buf[BLOCK_SIZE];
+	int blk_idx = -1;
+	int found_spot = 0;
+	int entries_per_block = BLOCK_SIZE / sizeof(struct dirent);
+
+	struct dirent existing;
+	if (dir_find(dir_inode.ino, fname, name_len, &existing) == 0) {
+		return -EEXIST;
+	}
+
+	for (int i = 0; i < 16; i++) {
+		if (dir_inode.direct_ptr[i] == 0) {
+			int new_blk = get_avail_blkno();
+			if (new_blk < 0) return -ENOSPC;
+			
+			dir_inode.direct_ptr[i] = new_blk;
+			dir_inode.size += BLOCK_SIZE;
+			
+			memset(block_buf, 0, BLOCK_SIZE);
+			bio_write(new_blk, block_buf);
+		}
+
+		// read block
+		if (bio_read(dir_inode.direct_ptr[i], block_buf) < 0) return -EIO;
+		
+		dir_entry = (struct dirent *)block_buf;
+
+		for (int j = 0; j < entries_per_block; j++) {
+			if (!dir_entry[j].valid) {
+				// Step 3: Add directory entry in dir_inode's data block and write to disk
+				dir_entry[j].valid = 1;
+				dir_entry[j].ino = f_ino;
+				dir_entry[j].len = name_len;
+				strncpy(dir_entry[j].name, fname, name_len);
+				dir_entry[j].name[name_len] = '\0';
+				
+				// write block back to disk
+				bio_write(dir_inode.direct_ptr[i], block_buf);
+				
+				found_spot = 1;
+				break;
+			}
+		}
+		if (found_spot) break;
+	}
+
+	if (!found_spot) return -ENOSPC; // directory full
+
+	// update directory inode
+	time_t now = time(NULL);
+	dir_inode.vstat.st_mtime = now;
+	dir_inode.vstat.st_atime = now;
 	
-	// Step 2: Check if fname (directory name) is already used in other entries
-
-	// Step 3: Add directory entry in dir_inode's data block and write to disk
-
-	// Allocate a new data block for this directory if it does not exist
-
-	// Update directory inode
-
-	// Write directory entry
+	// wite directory inode to disk
+	writei(dir_inode.ino, &dir_inode);
 
 	return 0;
 }
@@ -375,23 +448,29 @@ static void *rufs_init(struct fuse_conn_info *conn) {
 }
 
 static void rufs_destroy(void *userdata) {
-
-	// Step 1: De-allocate in-memory data structures
-	// Step 2: Close diskfile
-
 	dev_close();
-
 }
 
 static int rufs_getattr(const char *path, struct stat *stbuf) {
-
 	// Step 1: call get_node_by_path() to get inode from path
+	struct inode node;
+	int ret = get_node_by_path(path, 0, &node);
+	
+	if (ret < 0) {
+		return -ENOENT;
+	}
 
 	// Step 2: fill attribute of file into stbuf from inode
-
-	stbuf->st_mode   = S_IFDIR | 0755;
-	stbuf->st_nlink  = 2;
-	time(&stbuf->st_mtime);
+	stbuf->st_mode = node.vstat.st_mode;
+	stbuf->st_nlink = node.vstat.st_nlink;
+	stbuf->st_uid = node.vstat.st_uid;
+	stbuf->st_gid = node.vstat.st_gid;
+	stbuf->st_size = node.size;
+	stbuf->st_mtime = node.vstat.st_mtime;
+	stbuf->st_atime = node.vstat.st_atime;
+	stbuf->st_ctime = node.vstat.st_ctime;
+	stbuf->st_blksize = BLOCK_SIZE;
+	stbuf->st_blocks = (node.size + BLOCK_SIZE - 1) / BLOCK_SIZE * (BLOCK_SIZE / 512);
 
 	return 0;
 }
@@ -461,36 +540,24 @@ static int rufs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, 
 
 
 static int rufs_mkdir(const char *path, mode_t mode) {
-
-	// Step 1: Use dirname() and basename() to separate parent directory path and target directory name
-	// Step 2: Call get_node_by_path() to get inode of parent directory
-	// Step 3: Call get_avail_ino() to get an available inode number
-	// Step 4: Call dir_add() to add directory entry of target directory to parent directory
-	// Step 5: Update inode for target directory
-	// Step 6: Call writei() to write inode to disk
-
-
-	// 1: Check if directory already exists
+    // 1: Check if directory already exists
     struct inode tmp;
     if (get_node_by_path(path, 0, &tmp) == 0) {
-        // Already exists
         return -EEXIST;
     }
 
-    // 2: Split path into parent directory and new dir name
+    // 2: Split path
     char path_copy[PATH_MAX];
     strncpy(path_copy, path, PATH_MAX);
     path_copy[PATH_MAX - 1] = '\0';
 
     char *dirc  = strdup(path_copy);
     char *basec = strdup(path_copy);
-
     char *parent_path = dirname(dirc);
     char *name        = basename(basec);
 
     if (parent_path == NULL || name == NULL || strlen(name) == 0) {
-        free(dirc);
-        free(basec);
+        free(dirc); free(basec);
         return -EINVAL;
     }
 
@@ -498,32 +565,34 @@ static int rufs_mkdir(const char *path, mode_t mode) {
     struct inode parent_inode;
     int ret = get_node_by_path(parent_path, 0, &parent_inode);
     if (ret < 0) {
-        free(dirc);
-        free(basec);
+        free(dirc); free(basec);
         return ret;
     }
 
     if (!parent_inode.valid || parent_inode.type != TYPE_DIR) {
-        free(dirc);
-        free(basec);
+        free(dirc); free(basec);
         return -ENOTDIR;
     }
 
-    // 4: Get an available inode number for the new directory (Person B's helper)
+    // 4: Get an available inode number
     int new_ino = get_avail_ino();
     if (new_ino < 0) {
-        free(dirc);
-        free(basec);
+        free(dirc); free(basec);
         return -ENOSPC;
     }
 
-    // 5: Add a directory entry to the parent (Person B's dir_add)
+    // 5: Add a directory entry to the parent
     ret = dir_add(parent_inode, (uint16_t)new_ino, name, strlen(name));
     if (ret < 0) {
-        free(dirc);
-        free(basec);
+        free(dirc); free(basec);
         return ret;
     }
+
+    // FIX: Update parent link count (parent has new subdirectory '..')
+    parent_inode.link++;
+    parent_inode.vstat.st_nlink++;
+    parent_inode.vstat.st_mtime = time(NULL);
+    writei(parent_inode.ino, &parent_inode);
 
     // 6: Initialize new directory inode
     struct inode new_dir;
@@ -533,7 +602,7 @@ static int rufs_mkdir(const char *path, mode_t mode) {
     new_dir.valid = 1;
     new_dir.type  = TYPE_DIR;
     new_dir.size  = 0;
-    new_dir.link  = 2;  // "." and ".." (conceptually)
+    new_dir.link  = 2;  // "." and ".."
 
     new_dir.vstat.st_mode   = S_IFDIR | (mode & 0777 ? mode & 0777 : 0755);
     new_dir.vstat.st_nlink  = 2;
@@ -553,59 +622,185 @@ static int rufs_mkdir(const char *path, mode_t mode) {
     free(dirc);
     free(basec);
 
-	return 0;
+    return 0;
 }
 
 static int rufs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
+    // Step 1: Use dirname() and basename() to separate parent directory path and target file name
+    char path_copy[PATH_MAX];
+    strncpy(path_copy, path, PATH_MAX);
+    path_copy[PATH_MAX - 1] = '\0';
 
-	// Step 1: Use dirname() and basename() to separate parent directory path and target file name
+    char *dirc = strdup(path_copy);
+    char *basec = strdup(path_copy);
+    
+    char *dname = dirname(dirc);
+    char *bname = basename(basec);
 
-	// Step 2: Call get_node_by_path() to get inode of parent directory
+    // Step 2: Call get_node_by_path() to get inode of parent directory
+    struct inode parent_inode;
+    int ret = get_node_by_path(dname, 0, &parent_inode);
+    if (ret < 0) {
+        free(dirc);
+        free(basec);
+        return ret; // parent not found
+    }
 
-	// Step 3: Call get_avail_ino() to get an available inode number
+    // Step 3: Call get_avail_ino() to get an available inode number
+    int new_ino = get_avail_ino();
+    if (new_ino < 0) {
+        free(dirc);
+        free(basec);
+        return -ENOSPC;
+    }
 
-	// Step 4: Call dir_add() to add directory entry of target file to parent directory
+    // Step 4: Call dir_add() to add directory entry of target file to parent directory
+    ret = dir_add(parent_inode, new_ino, bname, strlen(bname));
+    if (ret < 0) {
+        free(dirc);
+        free(basec);
+        return ret;
+    }
 
-	// Step 5: Update inode for target file
+    // Step 5: Update inode for target file
+    struct inode new_inode;
+    memset(&new_inode, 0, sizeof(struct inode));
+    new_inode.ino = new_ino;
+    new_inode.valid = 1;
+    new_inode.size = 0;
+    new_inode.type = TYPE_FILE;
+    new_inode.link = 1;
+    
+    // Set vstat info
+    new_inode.vstat.st_mode = S_IFREG | mode;
+    new_inode.vstat.st_nlink = 1;
+    new_inode.vstat.st_uid = getuid();
+    new_inode.vstat.st_gid = getgid();
+    new_inode.vstat.st_size = 0;
+    new_inode.vstat.st_blksize = BLOCK_SIZE;
+    time(&new_inode.vstat.st_mtime);
+    new_inode.vstat.st_atime = new_inode.vstat.st_mtime;
+    new_inode.vstat.st_ctime = new_inode.vstat.st_mtime;
 
-	// Step 6: Call writei() to write inode to disk
+    // Step 6: Call writei() to write inode to disk
+    writei(new_ino, &new_inode);
 
-	return 0;
+    free(dirc);
+    free(basec);
+
+    return 0;
 }
 
 static int rufs_open(const char *path, struct fuse_file_info *fi) {
-
 	// Step 1: Call get_node_by_path() to get inode from path
+	struct inode node;
+	int ret = get_node_by_path(path, 0, &node);
 
-	// Step 2: If not find, return -1
+	// Step 2: If not find, return -1 (or appropriate error)
+	if (ret < 0) {
+		return -ENOENT;
+	}
 
 	return 0;
 }
 
 static int rufs_read(const char *path, char *buffer, size_t size, off_t offset, struct fuse_file_info *fi) {
+	// Step 1: Call get_node_by_path() to get inode from path
+	struct inode node;
+	int ret = get_node_by_path(path, 0, &node);
+	if (ret < 0) return ret;
 
-	// Step 1: You could call get_node_by_path() to get inode from path
+	// bound check
+	if (offset >= node.size) return 0;
+	if (offset + size > node.size) {
+		size = node.size - offset;
+	}
 
 	// Step 2: Based on size and offset, read its data blocks from disk
+	int bytes_read = 0;
+	char block_buf[BLOCK_SIZE];
 
-	// Step 3: copy the correct amount of data from offset to buffer
+	while (bytes_read < size) {
+		int curr_offset = offset + bytes_read;
+		int blk_idx = curr_offset / BLOCK_SIZE;
+		int blk_offset = curr_offset % BLOCK_SIZE;
+		int bytes_to_copy = BLOCK_SIZE - blk_offset;
+		if (bytes_to_copy > (size - bytes_read)) {
+			bytes_to_copy = size - bytes_read;
+		}
+
+		if (blk_idx >= 16) break; // max file size limit for direct pointers
+
+		int disk_blk = node.direct_ptr[blk_idx];
+		
+		if (disk_blk != 0) {
+			bio_read(disk_blk, block_buf);
+		} else {
+			memset(block_buf, 0, BLOCK_SIZE);
+		}
+
+		// Step 3: copy the correct amount of data from offset to buffer
+		memcpy(buffer + bytes_read, block_buf + blk_offset, bytes_to_copy);
+		bytes_read += bytes_to_copy;
+	}
 
 	// Note: this function should return the amount of bytes you copied to buffer
-	return 0;
+	return bytes_read;
 }
 
 static int rufs_write(const char *path, const char *buffer, size_t size, off_t offset, struct fuse_file_info *fi) {
-
-	// Step 1: You could call get_node_by_path() to get inode from path
+	// Step 1: Call get_node_by_path() to get inode from path
+	struct inode node;
+	int ret = get_node_by_path(path, 0, &node);
+	if (ret < 0) return ret;
 
 	// Step 2: Based on size and offset, read its data blocks from disk
+	int bytes_written = 0;
+	char block_buf[BLOCK_SIZE];
 
-	// Step 3: Write the correct amount of data from offset to disk
+	while (bytes_written < size) {
+		int curr_offset = offset + bytes_written;
+		int blk_idx = curr_offset / BLOCK_SIZE;
+		int blk_offset = curr_offset % BLOCK_SIZE;
+		int bytes_to_copy = BLOCK_SIZE - blk_offset;
+		if (bytes_to_copy > (size - bytes_written)) {
+			bytes_to_copy = size - bytes_written;
+		}
+
+		if (blk_idx >= 16) return -EFBIG; // file too big
+
+		// allocate block if it doesnt exist
+		if (node.direct_ptr[blk_idx] == 0) {
+			int new_blk = get_avail_blkno();
+			if (new_blk < 0) return -ENOSPC;
+			node.direct_ptr[blk_idx] = new_blk;
+			// Zero out the new block initially
+			memset(block_buf, 0, BLOCK_SIZE);
+			bio_write(new_blk, block_buf);
+		}
+
+		// Step 3: Write the correct amount of data from offset to disk
+		if (bytes_to_copy < BLOCK_SIZE) {
+			bio_read(node.direct_ptr[blk_idx], block_buf);
+		}
+		
+		memcpy(block_buf + blk_offset, buffer + bytes_written, bytes_to_copy);
+		bio_write(node.direct_ptr[blk_idx], block_buf);
+
+		bytes_written += bytes_to_copy;
+	}
 
 	// Step 4: Update the inode info and write it to disk
+	if (offset + bytes_written > node.size) {
+		node.size = offset + bytes_written;
+		node.vstat.st_size = node.size;
+	}
+	time(&node.vstat.st_mtime);
+	
+	writei(node.ino, &node);
 
 	// Note: this function should return the amount of bytes you write to disk
-	return size;
+	return bytes_written;
 }
 
 
